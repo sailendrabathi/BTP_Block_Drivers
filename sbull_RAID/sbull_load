@@ -24,6 +24,9 @@ else
     group="wheel"
 fi
 
+# rm /home/dileep/loopbackfile*
+# touch /home/dileep/loopbackfile0.img /home/dileep/loopbackfile2.img /home/dileep/loopbackfile1.img
+
 # invoke insmod with all arguments we got
 # and use a pathname, as newer modutils don't look in . by default
 insmod ./$module.ko $* || exit 1

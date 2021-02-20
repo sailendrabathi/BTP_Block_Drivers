@@ -56,7 +56,7 @@ module_param(ndevices, int, 0);
 
 #define CHUNK_IN_SECTORS 8
 
-#define NUM_DISKS 2
+#define NUM_DISKS 3
 
 /*
  * After this much idle time, the driver will simulate a media change.
@@ -76,7 +76,7 @@ struct sbull_dev {
         struct request_queue *queue;    /* The device request queue */
         struct gendisk *gd;             /* The gendisk structure */
         struct timer_list timer;        /* For simulated media changes */
-		struct file* backing_file[NUM_DISKS+1];	/* List of backing files */
+		struct file* backing_file[NUM_DISKS];	/* List of backing files */
 };
 
 static struct sbull_dev *Devices = NULL;
@@ -166,7 +166,7 @@ static int sbull_xfer_bio(struct file * backing_file, struct bio *bio)
 	return 0; /* Always "succeed" */
 }
 
-static int setparity(struct sbull_dev *dev,struct bio* bio , int disk_num){
+static int setparity(struct sbull_dev *dev,struct bio* bio , int disk_num , int parity_disk){
 
 	// struct bio* partiy = bio_alloc(GFP_NOIO,1);
 
@@ -175,24 +175,34 @@ static int setparity(struct sbull_dev *dev,struct bio* bio , int disk_num){
 	struct bvec_iter iter;
 	struct iov_iter i;
 	ssize_t len;
-	loff_t pos = ((bio->bi_iter.bi_sector)*KERNEL_SECTOR_SIZE) , pos2 = pos;
+	loff_t pos = ((bio->bi_iter.bi_sector)*KERNEL_SECTOR_SIZE);
 
-	char buf[8*hardsect_size + 1];
 	bio_for_each_segment(bvec,bio,iter){
-		len = kernel_read(dev->backing_file[1^disk_num] , (void __user *) buf ,bvec.bv_len , &pos);
-		if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
+		
+		char xorbuf[bvec.bv_len+1];
 		char *written = kmap_atomic(bvec.bv_page);
 		char *bufferstart = written + bvec.bv_offset ; 
-		char newbuf[bvec.bv_len+1];
-
 		unsigned int k;
 		for(k=0;k<bvec.bv_len ; ++k){
-			newbuf[k] = (char ) bufferstart[k] ^ buf[k];
+			xorbuf[k] = bufferstart[k];
 		}
-		len = kernel_write(dev->backing_file[2] , (void __user *)newbuf , bvec.bv_len , &pos2);
+		kunmap_atomic(written);
+
+		int disk;
+		for (disk =0 ;disk<NUM_DISKS;++disk){
+			if(disk == parity_disk || disk == disk_num) continue;
+			loff_t postemp = pos;
+			char buf[bvec.bv_len+1];
+			len = kernel_read(dev->backing_file[disk] , (void __user *) buf ,bvec.bv_len , &postemp);
+			if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
+			for(k=0;k<bvec.bv_len ; ++k){
+				xorbuf[k] = xorbuf[k]^bufferstart[k];
+			}
+		}
+		
+		len = kernel_write(dev->backing_file[parity_disk] , (void __user *)xorbuf, bvec.bv_len , &pos);
 		if(len<0) printk(KERN_INFO"Parity : kernel_write failed");
 
-		kunmap_atomic(written);
 	}
 	return 0;
 }
@@ -215,13 +225,18 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 
 		while(rem > 0){
 			unsigned int chunk_index = start_sector / CHUNK_IN_SECTORS;
-			unsigned int stripe_index = chunk_index / NUM_DISKS;
-			unsigned int disk_num = (start_sector % (CHUNK_IN_SECTORS * NUM_DISKS)) / CHUNK_IN_SECTORS;
+			unsigned int stripe_index = chunk_index / (NUM_DISKS-1);
+			unsigned int disk_num = (start_sector % (CHUNK_IN_SECTORS * (NUM_DISKS-1))) / CHUNK_IN_SECTORS;
 			unsigned int sector_num = start_sector;
-			sector_num /= CHUNK_IN_SECTORS * NUM_DISKS;
+
+			unsigned int parity_disk = (NUM_DISKS-1) - ((stripe_index/4)%NUM_DISKS);
+			
+			sector_num /= CHUNK_IN_SECTORS * (NUM_DISKS-1);
 			sector_num *= CHUNK_IN_SECTORS;
 			sector_num += start_sector % CHUNK_IN_SECTORS;
 			unsigned int n_sec = CHUNK_IN_SECTORS - (sector_num % CHUNK_IN_SECTORS);
+			if(parity_disk <= disk_num) disk_num++;
+
 			if(rem <= n_sec){
 				n_sec = rem;
 				bio_1->bi_iter.bi_sector = sector_num;
@@ -231,8 +246,9 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 				sbull_xfer_bio(dev->backing_file[disk_num], bio_1);
 
 				if(bio_data_dir(temp1) == WRITE){
+
 					printk(KERN_WARNING "Entering write");
-					int stat = setparity(dev,temp1 , disk_num);
+					int stat = setparity(dev,temp1 , disk_num , parity_disk);
 					if(stat<0) printk("Parity set failed");
 				}
 
@@ -245,7 +261,7 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 
 				if(bio_data_dir(bio_temp2) == WRITE) {
 					printk(KERN_WARNING"Entering write");
-					int stat = setparity(dev,bio_temp2 , disk_num);
+					int stat = setparity(dev,bio_temp2 , disk_num , parity_disk);
 					if(stat<0) printk("Parity set failed");
 				}
 
@@ -498,15 +514,16 @@ static void setup_device(struct sbull_dev *dev, int which)
 		}
 	}
 	*/
-	// char filename[200];
-	// int d;
-	// for(d=0;d<NUM_DISKS;++d){
-	// 	sprintf(filename , "/home/dileep/loopbackfile%d.img",d);
-	// 	dev->backing_file[d] = filp_open(filename,O_RDWR , 0);
-	// }
-	dev->backing_file[0] = filp_open("/home/dileep/loopbackfile0.img", O_RDWR, 0);
-	dev->backing_file[1] = filp_open("/home/dileep/loopbackfile1.img", O_RDWR, 0);
-	dev->backing_file[2] = filp_open("/home/dileep/loopbackfile2.img", O_RDWR, 0);
+	
+	int d;
+	for(d=0;d<NUM_DISKS;++d){
+		char filename[200];
+		sprintf(filename , "/home/dileep/loopbackfile%d.img",d);
+		dev->backing_file[d] = filp_open(filename,O_RDWR , 0);
+	}
+	// dev->backing_file[0] = filp_open("/home/dileep/loopbackfile0.img", O_RDWR, 0);
+	// dev->backing_file[1] = filp_open("/home/dileep/loopbackfile1.img", O_RDWR, 0);
+	// dev->backing_file[2] = filp_open("/home/dileep/loopbackfile2.img", O_RDWR, 0);
 
 
 	spin_lock_init(&dev->lock);
