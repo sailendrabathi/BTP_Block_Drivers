@@ -76,7 +76,7 @@ struct sbull_dev {
         struct request_queue *queue;    /* The device request queue */
         struct gendisk *gd;             /* The gendisk structure */
         struct timer_list timer;        /* For simulated media changes */
-		struct file* backing_file[NUM_DISKS];	/* List of backing files */
+		struct file* backing_file[NUM_DISKS+1];	/* List of backing files */
 };
 
 static struct sbull_dev *Devices = NULL;
@@ -166,6 +166,37 @@ static int sbull_xfer_bio(struct file * backing_file, struct bio *bio)
 	return 0; /* Always "succeed" */
 }
 
+static int setparity(struct sbull_dev *dev,struct bio* bio , int disk_num){
+
+	// struct bio* partiy = bio_alloc(GFP_NOIO,1);
+
+	printk(KERN_INFO "Setting Parity");
+	struct bio_vec bvec;
+	struct bvec_iter iter;
+	struct iov_iter i;
+	ssize_t len;
+	loff_t pos = ((bio->bi_iter.bi_sector)*KERNEL_SECTOR_SIZE) , pos2 = pos;
+
+	char buf[8*hardsect_size + 1];
+	bio_for_each_segment(bvec,bio,iter){
+		len = kernel_read(dev->backing_file[1^disk_num] , (void __user *) buf ,bvec.bv_len , &pos);
+		if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
+		char *written = kmap_atomic(bvec.bv_page);
+		char *bufferstart = written + bvec.bv_offset ; 
+		char newbuf[bvec.bv_len+1];
+
+		unsigned int k;
+		for(k=0;k<bvec.bv_len ; ++k){
+			newbuf[k] = (char ) bufferstart[k] ^ buf[k];
+		}
+		len = kernel_write(dev->backing_file[2] , (void __user *)newbuf , bvec.bv_len , &pos2);
+		if(len<0) printk(KERN_INFO"Parity : kernel_write failed");
+
+		kunmap_atomic(written);
+	}
+	return 0;
+}
+
 /*
  * Transfer a full request.
  */
@@ -194,12 +225,29 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 			if(rem <= n_sec){
 				n_sec = rem;
 				bio_1->bi_iter.bi_sector = sector_num;
+				
+				struct bio* temp1 = bio_clone_fast(bio_1 , GFP_NOIO , NULL);
+
 				sbull_xfer_bio(dev->backing_file[disk_num], bio_1);
+
+				if(bio_data_dir(temp1) == WRITE){
+					printk(KERN_WARNING "Entering write");
+					int stat = setparity(dev,temp1 , disk_num);
+					if(stat<0) printk("Parity set failed");
+				}
+
 			}
 			else{
 				struct bio *bio_temp = bio_split(bio_1, n_sec, GFP_NOIO, NULL);
+				struct bio *bio_temp2 = bio_clone_fast(bio_temp , GFP_NOIO, NULL);
 				bio_temp->bi_iter.bi_sector = sector_num;
 				sbull_xfer_bio(dev->backing_file[disk_num], bio_temp);
+
+				if(bio_data_dir(bio_temp2) == WRITE) {
+					printk(KERN_WARNING"Entering write");
+					int stat = setparity(dev,bio_temp2 , disk_num);
+					if(stat<0) printk("Parity set failed");
+				}
 
 				//bio_put(bio_temp);
 			}	
@@ -208,6 +256,7 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 			//disk_num = (disk_num+1)/NUM_DISKS;
 			rem -= n_sec;
 		}
+
 
 		
 		nsect += bio->bi_iter.bi_size/KERNEL_SECTOR_SIZE;
@@ -449,8 +498,16 @@ static void setup_device(struct sbull_dev *dev, int which)
 		}
 	}
 	*/
-	dev->backing_file[0] = filp_open("/home/sailendra/loopbackfile0.img", O_RDWR, 0);
-	dev->backing_file[1] = filp_open("/home/sailendra/loopbackfile1.img", O_RDWR, 0);
+	// char filename[200];
+	// int d;
+	// for(d=0;d<NUM_DISKS;++d){
+	// 	sprintf(filename , "/home/dileep/loopbackfile%d.img",d);
+	// 	dev->backing_file[d] = filp_open(filename,O_RDWR , 0);
+	// }
+	dev->backing_file[0] = filp_open("/home/dileep/loopbackfile0.img", O_RDWR, 0);
+	dev->backing_file[1] = filp_open("/home/dileep/loopbackfile1.img", O_RDWR, 0);
+	dev->backing_file[2] = filp_open("/home/dileep/loopbackfile2.img", O_RDWR, 0);
+
 
 	spin_lock_init(&dev->lock);
 	
@@ -529,9 +586,9 @@ static int __init sbull_init(void)
     
 	return 0;
 
-out_unregister:
-	unregister_blkdev(sbull_major, "sbd");
-	return -ENOMEM;
+	out_unregister:
+		unregister_blkdev(sbull_major, "sbd");
+		return -ENOMEM;
 }
 
 static void sbull_exit(void)
