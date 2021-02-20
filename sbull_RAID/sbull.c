@@ -42,17 +42,6 @@ static int ndevices = 1;
 module_param(ndevices, int, 0);
 
 /*
- * The different "request modes" we can use.
- */
-enum {
-	RM_SIMPLE  = 0,	/* The extra-simple request function */
-	RM_FULL    = 1,	/* The full-blown version */
-	RM_NOQUEUE = 2,	/* Use make_request */
-};
-static int request_mode = RM_NOQUEUE;
-module_param(request_mode, int, 0);
-
-/*
  * Minor number and partition management.
  */
 #define SBULL_MINORS	16
@@ -64,6 +53,10 @@ module_param(request_mode, int, 0);
  * in terms of small sectors, always.
  */
 #define KERNEL_SECTOR_SIZE	512
+
+#define CHUNK_IN_SECTORS 8
+
+#define NUM_DISKS 2
 
 /*
  * After this much idle time, the driver will simulate a media change.
@@ -83,7 +76,7 @@ struct sbull_dev {
         struct request_queue *queue;    /* The device request queue */
         struct gendisk *gd;             /* The gendisk structure */
         struct timer_list timer;        /* For simulated media changes */
-		struct file *backing_file;
+		struct file* backing_file[NUM_DISKS];	/* List of backing files */
 };
 
 static struct sbull_dev *Devices = NULL;
@@ -135,148 +128,13 @@ static int lo_write_bvec(struct file *file, struct bio_vec *bvec, loff_t *ppos)
 }
 
 
-static int write_simple(struct sbull_dev *lo, struct request *rq)
-{
-	struct bio_vec bvec;
-	struct req_iterator iter;
-	struct iov_iter i;
-	ssize_t len = 0;
-	printk(KERN_NOTICE "file_sbull: write_simple.\n");
-	loff_t pos = ((loff_t)blk_rq_pos(rq) << 9);
-	rq_for_each_segment(bvec, rq, iter)
-	{
-		// iov_iter_bvec(&i, WRITE, &bvec, 1, bvec.bv_len);
-		// len = vfs_iter_write(lo->backing_file, &i, &pos, 0);
-
-		len = lo_write_bvec(lo->backing_file,&bvec,&pos);
-		if (len < 0)
-			return len;
-		cond_resched();
-	}
-
-	return 0;
-}
-
-static int read_simple(struct sbull_dev *lo, struct request *rq)
-{
-	struct bio_vec bvec;
-	struct req_iterator iter;
-	struct iov_iter i;
-	ssize_t len;
-	printk(KERN_NOTICE "file_sbull: read_simple.\n");
-	loff_t pos = ((loff_t)blk_rq_pos(rq) << 9);
-	rq_for_each_segment(bvec, rq, iter)
-	{
-		iov_iter_bvec(&i, READ, &bvec, 1, bvec.bv_len);
-		len = vfs_iter_read(lo->backing_file, &i, &pos, 0);
-		if (len < 0)
-			return len;
-		cond_resched();
-	}
-
-	return 0;
-}
-
-
-/*
- * Handle an I/O request.
- */
-static void sbull_transfer(struct sbull_dev *dev, unsigned long sector,
-		unsigned long nsect, char *buffer, int write)
-{
-	unsigned long offset = sector*KERNEL_SECTOR_SIZE;
-	unsigned long nbytes = nsect*KERNEL_SECTOR_SIZE;
-
-	loff_t offt = offset;
-
-	if ((offset + nbytes) > dev->size) {
-		printk (KERN_NOTICE "Beyond-end write (%ld %ld)\n", offset, nbytes);
-		return;
-	}
-	printk(KERN_INFO "sbull_tarnsfer");
-	if (write)
-		// memcpy(dev->data + offset, buffer, nbytes);
-		vfs_write(dev->backing_file, buffer, nbytes, &offt);
-	else
-		// memcpy(buffer, dev->data + offset, nbytes);
-		vfs_read(dev->backing_file, buffer, nbytes, &offt);
-}
-
-/*
- * The simple form of the request function.
- */
-//static void sbull_request(struct request_queue *q)
-static blk_status_t sbull_request(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data* bd)   /* For blk-mq */
-{
-	struct request *req = bd->rq;
-	struct sbull_dev *dev = req->rq_disk->private_data;
-	struct bio_vec bvec;
-	struct req_iterator iter;
-	sector_t pos_sector = blk_rq_pos(req);
-	void	*buffer;
-	blk_status_t  ret;
-
-	printk(KERN_INFO "file_sbull: sbull_request\n");
-
-	blk_mq_start_request (req);
-
-	if (blk_rq_is_passthrough(req)) {
-		printk (KERN_NOTICE "Skip non-fs request\n");
-                ret = BLK_STS_IOERR;  //-EIO
-			goto done;
-	}
-
-	if (rq_data_dir(req) == WRITE)
-		write_simple(dev, req);
-	else
-		read_simple(dev, req);
-
-	/*
-	rq_for_each_segment(bvec, req, iter)
-	{
-		size_t num_sector = blk_rq_cur_sectors(req);
-		printk (KERN_NOTICE "Req dev %u dir %d sec %lld, nr %ld\n",
-                        (unsigned)(dev - Devices), rq_data_dir(req),
-                        pos_sector, num_sector);
-		buffer = page_address(bvec.bv_page) + bvec.bv_offset;
-		sbull_transfer(dev, pos_sector, num_sector,
-				buffer, rq_data_dir(req) == WRITE);
-		pos_sector += num_sector;
-	}
-	*/
-
-	ret = BLK_STS_OK;
-done:
-	blk_mq_end_request (req, ret);
-	return ret;
-}
-
-
 /*
  * Transfer a single BIO.
  */
-static int sbull_xfer_bio(struct sbull_dev *dev, struct bio *bio)
+static int sbull_xfer_bio(struct file * backing_file, struct bio *bio)
 {
-	// struct bio_vec bvec;
-	// struct bvec_iter iter;
-	// sector_t sector = bio->bi_iter.bi_sector;
-
+	
 	printk(KERN_INFO "sbull_xfer_bio");
-
-	
-	// /* Do each segment independently. */
-	// bio_for_each_segment(bvec, bio, iter) {
-	// 	//char *buffer = __bio_kmap_atomic(bio, i, KM_USER0);
-	// 	char *buffer = kmap_atomic(bvec.bv_page) + bvec.bv_offset;
-	// 	//sbull_transfer(dev, sector, bio_cur_bytes(bio) >> 9,
-	// 	sbull_transfer(dev, sector, (bio_cur_bytes(bio) / KERNEL_SECTOR_SIZE),
-	// 			buffer, bio_data_dir(bio) == WRITE);
-	// 	//sector += bio_cur_bytes(bio) >> 9;
-	// 	sector += (bio_cur_bytes(bio) / KERNEL_SECTOR_SIZE);
-	// 	//__bio_kunmap_atomic(buffer, KM_USER0);
-	// 	kunmap_atomic(buffer);
-	// }
-	
 	struct bio_vec bvec;
 	struct bvec_iter iter;
 	struct iov_iter i;
@@ -287,9 +145,7 @@ static int sbull_xfer_bio(struct sbull_dev *dev, struct bio *bio)
 		printk(KERN_INFO "file_sbull: full req WRITE bio.\n");
 		bio_for_each_segment(bvec, bio, iter)
 		{
-			// iov_iter_bvec(&i, WRITE, &bvec, 1, bvec.bv_len);
-			// len = vfs_iter_write(dev->backing_file, &i, &pos, 0);
-			len = lo_write_bvec(dev->backing_file,&bvec,&pos);
+			len = lo_write_bvec(backing_file,&bvec,&pos);
 			if (len < 0)
 				return len;
 			cond_resched();
@@ -300,7 +156,7 @@ static int sbull_xfer_bio(struct sbull_dev *dev, struct bio *bio)
 		bio_for_each_segment(bvec, bio, iter)
 		{
 			iov_iter_bvec(&i, READ, &bvec, 1, bvec.bv_len);
-			len = vfs_iter_read(dev->backing_file, &i, &pos, 0);
+			len = vfs_iter_read(backing_file, &i, &pos, 0);
 			if (len < 0)
 				return len;
 			cond_resched();
@@ -320,9 +176,40 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
     
 	printk(KERN_INFO "sbull_xfer_request");
 
-	__rq_for_each_bio(bio, req) {
-		sbull_xfer_bio(dev, bio);
-		//nsect += bio->bi_size/KERNEL_SECTOR_SIZE;
+	__rq_for_each_bio(bio, req){
+		struct bio* bio_1 = bio_clone_fast(bio, GFP_NOIO, NULL);
+
+		unsigned int start_sector = bio_1->bi_iter.bi_sector;
+		unsigned int rem = bio_1->bi_iter.bi_size / KERNEL_SECTOR_SIZE;
+
+		while(rem > 0){
+			unsigned int chunk_index = start_sector / CHUNK_IN_SECTORS;
+			unsigned int stripe_index = chunk_index / NUM_DISKS;
+			unsigned int disk_num = (start_sector % (CHUNK_IN_SECTORS * NUM_DISKS)) / CHUNK_IN_SECTORS;
+			unsigned int sector_num = start_sector;
+			sector_num /= CHUNK_IN_SECTORS * NUM_DISKS;
+			sector_num *= CHUNK_IN_SECTORS;
+			sector_num += start_sector % CHUNK_IN_SECTORS;
+			unsigned int n_sec = CHUNK_IN_SECTORS - (sector_num % CHUNK_IN_SECTORS);
+			if(rem <= n_sec){
+				n_sec = rem;
+				bio_1->bi_iter.bi_sector = sector_num;
+				sbull_xfer_bio(dev->backing_file[disk_num], bio_1);
+			}
+			else{
+				struct bio *bio_temp = bio_split(bio_1, n_sec, GFP_NOIO, NULL);
+				bio_temp->bi_iter.bi_sector = sector_num;
+				sbull_xfer_bio(dev->backing_file[disk_num], bio_temp);
+
+				//bio_put(bio_temp);
+			}	
+
+			start_sector += n_sec;
+			//disk_num = (disk_num+1)/NUM_DISKS;
+			rem -= n_sec;
+		}
+
+		
 		nsect += bio->bi_iter.bi_size/KERNEL_SECTOR_SIZE;
 	}
 	return nsect;
@@ -367,25 +254,25 @@ static blk_status_t sbull_full_request(struct blk_mq_hw_ctx * hctx, const struct
 
 
 
-/*
- * The direct make request version.
- */
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0))
-//static void sbull_make_request(struct request_queue *q, struct bio *bio)
-static blk_qc_t sbull_make_request(struct request_queue *q, struct bio *bio)
-#else
-static blk_qc_t sbull_make_request(struct bio *bio)
-#endif
-{
-	//struct sbull_dev *dev = q->queuedata;
-	struct sbull_dev *dev = bio->bi_disk->private_data;
-	int status;
-	printk(KERN_NOTICE "file_sbull: Entered sbull_make_request\n");
-	status = sbull_xfer_bio(dev, bio);
-	bio->bi_status = status;
-	bio_endio(bio);
-	return BLK_QC_T_NONE;
-}
+// /*
+//  * The direct make request version.
+//  */
+// #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0))
+// //static void sbull_make_request(struct request_queue *q, struct bio *bio)
+// static blk_qc_t sbull_make_request(struct request_queue *q, struct bio *bio)
+// #else
+// static blk_qc_t sbull_make_request(struct bio *bio)
+// #endif
+// {
+// 	//struct sbull_dev *dev = q->queuedata;
+// 	struct sbull_dev *dev = bio->bi_disk->private_data;
+// 	int status;
+// 	printk(KERN_NOTICE "file_sbull: Entered sbull_make_request\n");
+// 	status = sbull_xfer_bio(dev, bio);
+// 	bio->bi_status = status;
+// 	bio_endio(bio);
+// 	return BLK_QC_T_NONE;
+// }
 
 
 /*
@@ -536,9 +423,6 @@ static struct block_device_operations sbull_ops = {
 	.ioctl	         = sbull_ioctl
 };
 
-static struct blk_mq_ops mq_ops_simple = {
-    .queue_rq = sbull_request,
-};
 
 static struct blk_mq_ops mq_ops_full = {
     .queue_rq = sbull_full_request,
@@ -555,12 +439,19 @@ static void setup_device(struct sbull_dev *dev, int which)
 	 */
 	memset (dev, 0, sizeof (struct sbull_dev));
 	dev->size = nsectors*hardsect_size;
-	dev->data = vmalloc(dev->size);
-	dev->backing_file = filp_open("/home/ashrut/loopbackfile.img", O_RDWR, 0);
-	if (dev->backing_file == NULL) {
-		printk (KERN_NOTICE "filp_open failure.\n");
-		return;
+	// dev->data = vmalloc(dev->size);
+	/* need to change
+	for(int i=0;i<NUM_DISKS;++i){
+		dev->backing_file[i] = filp_open("/home/sailendra/loopbackfile" + i + ".img", O_RDWR, 0);
+		if (dev->backing_file[i] == NULL) {
+			printk (KERN_NOTICE "filp_open failure.\n");
+			return;
+		}
 	}
+	*/
+	dev->backing_file[0] = filp_open("/home/sailendra/loopbackfile0.img", O_RDWR, 0);
+	dev->backing_file[1] = filp_open("/home/sailendra/loopbackfile1.img", O_RDWR, 0);
+
 	spin_lock_init(&dev->lock);
 	
 	/*
@@ -576,40 +467,13 @@ static void setup_device(struct sbull_dev *dev, int which)
 
 
 	
-	/*
-	 * The I/O queue, depending on whether we are using our own
-	 * make_request function or not.
-	 */
-	switch (request_mode) {
-	    case RM_NOQUEUE:
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0))
-		dev->queue =  blk_generic_alloc_queue(sbull_make_request, NUMA_NO_NODE);
-#else
-		dev->queue =  blk_generic_alloc_queue(NUMA_NO_NODE);
-#endif
-		if (dev->queue == NULL)
-			goto out_vfree;
-		break;
-
-	    case RM_FULL:
 		//dev->queue = blk_init_queue(sbull_full_request, &dev->lock);
 		dev->queue = blk_mq_init_sq_queue(&dev->tag_set, &mq_ops_full, 128, BLK_MQ_F_SHOULD_MERGE);
 		if (dev->queue == NULL)
 			goto out_vfree;
-		break;
 
-	    default:
-		printk(KERN_NOTICE "Bad request mode %d, using simple\n", request_mode);
-        	/* fall into.. */
-	
-	    case RM_SIMPLE:
-		//dev->queue = blk_init_queue(sbull_request, &dev->lock);
-		printk(KERN_NOTICE "Bad request mode %d, using simple\n", request_mode);
-		dev->queue = blk_mq_init_sq_queue(&dev->tag_set, &mq_ops_simple, 128, BLK_MQ_F_SHOULD_MERGE);
-		if (dev->queue == NULL)
-			goto out_vfree;
-		break;
-	}
+	    
+
 	blk_queue_logical_block_size(dev->queue, hardsect_size);
 	dev->queue->queuedata = dev;
 	/*
@@ -633,8 +497,11 @@ static void setup_device(struct sbull_dev *dev, int which)
 out_vfree:
 	if (dev->data)
 		vfree(dev->data);
-	if (dev->backing_file)
-		fput(dev->backing_file);	
+	int i;	
+	for(i=0;i<NUM_DISKS;++i){
+		if (dev->backing_file[i])
+			fput(dev->backing_file[i]);
+	}		
 }
 
 
@@ -679,16 +546,15 @@ static void sbull_exit(void)
 			put_disk(dev->gd);
 		}
 		if (dev->queue) {
-			if (request_mode == RM_NOQUEUE)
-				//kobject_put (&dev->queue->kobj);
-				blk_put_queue(dev->queue);
-			else
-				blk_cleanup_queue(dev->queue);
+			blk_cleanup_queue(dev->queue);
 		}
 		if (dev->data)
 			vfree(dev->data);
-		if (dev->backing_file)
-			fput(dev->backing_file);	
+		int j;	
+		for(j=0;j<NUM_DISKS;++j){
+			if (dev->backing_file[j])
+				fput(dev->backing_file[j]);
+		}	
 	}
 	unregister_blkdev(sbull_major, "sbull");
 	kfree(Devices);
