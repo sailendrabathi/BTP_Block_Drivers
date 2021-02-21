@@ -24,8 +24,9 @@ else
     group="wheel"
 fi
 
-# rm /home/dileep/loopbackfile*
-# touch /home/dileep/loopbackfile0.img /home/dileep/loopbackfile2.img /home/dileep/loopbackfile1.img
+# rm -f /home/sailendra/loopbackfile*
+# echo "here"
+# touch /home/sailendra/loopbackfile0.img /home/sailendra/loopbackfile1.img /home/sailendra/loopbackfile2.img
 
 # invoke insmod with all arguments we got
 # and use a pathname, as newer modutils don't look in . by default

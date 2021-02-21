@@ -252,6 +252,9 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 					if(stat<0) printk("Parity set failed");
 				}
 
+
+				bio_put(temp1);
+
 			}
 			else{
 				struct bio *bio_temp = bio_split(bio_1, n_sec, GFP_NOIO, NULL);
@@ -265,7 +268,8 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 					if(stat<0) printk("Parity set failed");
 				}
 
-				//bio_put(bio_temp);
+				bio_put(bio_temp);
+				bio_put(bio_temp2);
 			}	
 
 			start_sector += n_sec;
@@ -273,7 +277,7 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 			rem -= n_sec;
 		}
 
-
+		bio_put(bio_1);
 		
 		nsect += bio->bi_iter.bi_size/KERNEL_SECTOR_SIZE;
 	}
@@ -518,7 +522,7 @@ static void setup_device(struct sbull_dev *dev, int which)
 	int d;
 	for(d=0;d<NUM_DISKS;++d){
 		char filename[200];
-		sprintf(filename , "/home/dileep/loopbackfile%d.img",d);
+		sprintf(filename , "/home/sailendra/loopbackfile%d.img",d);
 		dev->backing_file[d] = filp_open(filename,O_RDWR , 0);
 	}
 	// dev->backing_file[0] = filp_open("/home/dileep/loopbackfile0.img", O_RDWR, 0);
