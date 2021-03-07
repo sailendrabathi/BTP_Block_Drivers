@@ -29,6 +29,7 @@
 #include <linux/bio.h>
 #include <linux/uio.h>
 #include <linux/file.h>
+#include <linux/kthread.h>
 
 MODULE_LICENSE("Dual BSD/GPL");
 
@@ -63,6 +64,17 @@ module_param(ndevices, int, 0);
  */
 #define INVALIDATE_DELAY	30*HZ
 
+
+struct disk_dev{
+	struct task_struct* disk_thread;
+	struct bio_list bio_list;
+	spinlock_t lock;
+	struct file* backing_file;
+	int num;
+	// DECLARE_WAIT_QUEUE_HEAD(req_event);
+	// struct wait_queue_head req_event;
+};
+
 /*
  * The internal representation of our device.
  */
@@ -76,7 +88,7 @@ struct sbull_dev {
         struct request_queue *queue;    /* The device request queue */
         struct gendisk *gd;             /* The gendisk structure */
         struct timer_list timer;        /* For simulated media changes */
-		struct file* backing_file[NUM_DISKS];	/* List of backing files */
+		struct disk_dev disk_devs[NUM_DISKS];
 };
 
 static struct sbull_dev *Devices = NULL;
@@ -166,6 +178,28 @@ static int sbull_xfer_bio(struct file * backing_file, struct bio *bio)
 	return 0; /* Always "succeed" */
 }
 
+
+static DECLARE_WAIT_QUEUE_HEAD(req_event0);
+static int thread_foo(void *data){
+	struct bio *bio;
+	struct disk_dev* ddev = (struct disk_dev *)data;
+	while(!kthread_should_stop()){
+		wait_event_interruptible(ddev->req_event,kthread_should_stop() || !bio_list_empty(&ddev->bio_list));
+		spin_lock_irq(&ddev->lock);
+        if (bio_list_empty(&ddev->bio_list))
+        {
+            spin_unlock_irq(&ddev->lock);
+            continue;
+        }
+
+		bio = bio_list_pop(&ddev->bio_list);
+		spin_unlock_irq(&ddev->lock);
+		sbull_xfer_bio(ddev->backing_file, bio);
+		printk(KERN_NOTICE "sbull_raid: threadfoo %d\n", ddev->num);
+	}
+	return 0;
+}
+
 static int setparity(struct sbull_dev *dev,struct bio* bio , int disk_num , int parity_disk){
 
 	// struct bio* partiy = bio_alloc(GFP_NOIO,1);
@@ -193,14 +227,14 @@ static int setparity(struct sbull_dev *dev,struct bio* bio , int disk_num , int 
 			if(disk == parity_disk || disk == disk_num) continue;
 			loff_t postemp = pos;
 			char buf[bvec.bv_len+1];
-			len = kernel_read(dev->backing_file[disk] , (void __user *) buf ,bvec.bv_len , &postemp);
+			len = kernel_read(dev->disk_devs[disk].backing_file , (void __user *) buf ,bvec.bv_len , &postemp);
 			if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
 			for(k=0;k<bvec.bv_len ; ++k){
-				xorbuf[k] = xorbuf[k]^bufferstart[k];
+				xorbuf[k] = xorbuf[k]^buf[k];
 			}
 		}
 		
-		len = kernel_write(dev->backing_file[parity_disk] , (void __user *)xorbuf, bvec.bv_len , &pos);
+		len = kernel_write(dev->disk_devs[parity_disk].backing_file , (void __user *)xorbuf, bvec.bv_len , &pos);
 		if(len<0) printk(KERN_INFO"Parity : kernel_write failed");
 
 	}
@@ -243,14 +277,18 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 				
 				struct bio* temp1 = bio_clone_fast(bio_1 , GFP_NOIO , NULL);
 
-				sbull_xfer_bio(dev->backing_file[disk_num], bio_1);
+				// sbull_xfer_bio(dev->disk_devs[disk_num].backing_file, bio_1);
+				printk(KERN_NOTICE "sbull_raid: Bio for %d\n.", disk_num);
+				bio_list_add(&dev->disk_devs[disk_num].bio_list, bio_1);
+				wake_up(&dev->disk_devs[disk_num].req_event);
 
-				if(bio_data_dir(temp1) == WRITE){
 
-					printk(KERN_WARNING "Entering write");
-					int stat = setparity(dev,temp1 , disk_num , parity_disk);
-					if(stat<0) printk("Parity set failed");
-				}
+				// if(bio_data_dir(temp1) == WRITE){
+
+				// 	printk(KERN_WARNING "Entering write");
+				// 	int stat = setparity(dev,temp1 , disk_num , parity_disk);
+				// 	if(stat<0) printk("Parity set failed");
+				// }
 
 
 				bio_put(temp1);
@@ -260,13 +298,18 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 				struct bio *bio_temp = bio_split(bio_1, n_sec, GFP_NOIO, NULL);
 				struct bio *bio_temp2 = bio_clone_fast(bio_temp , GFP_NOIO, NULL);
 				bio_temp->bi_iter.bi_sector = sector_num;
-				sbull_xfer_bio(dev->backing_file[disk_num], bio_temp);
+				// sbull_xfer_bio(dev->disk_devs[disk_num].backing_file, bio_temp);
 
-				if(bio_data_dir(bio_temp2) == WRITE) {
-					printk(KERN_WARNING"Entering write");
-					int stat = setparity(dev,bio_temp2 , disk_num , parity_disk);
-					if(stat<0) printk("Parity set failed");
-				}
+				printk(KERN_NOTICE "sbull_raid: Bio for %d\n.", disk_num);
+				bio_list_add(&dev->disk_devs[disk_num].bio_list, bio_temp);
+				wake_up(&dev->disk_devs[disk_num].req_event);
+				
+
+				// if(bio_data_dir(bio_temp2) == WRITE) {
+				// 	printk(KERN_WARNING"Entering write");
+				// 	int stat = setparity(dev,bio_temp2 , disk_num , parity_disk);
+				// 	if(stat<0) printk("Parity set failed");
+				// }
 
 				bio_put(bio_temp);
 				bio_put(bio_temp2);
@@ -497,7 +540,9 @@ static struct blk_mq_ops mq_ops_full = {
     .queue_rq = sbull_full_request,
 };
 
-
+// static DECLARE_WAIT_QUEUE_HEAD(req_event0);
+// static DECLARE_WAIT_QUEUE_HEAD(req_event1);
+// static DECLARE_WAIT_QUEUE_HEAD(req_event2);
 /*
  * Set up our internal device.
  */
@@ -522,9 +567,15 @@ static void setup_device(struct sbull_dev *dev, int which)
 	int d;
 	for(d=0;d<NUM_DISKS;++d){
 		char filename[200];
-		sprintf(filename , "/home/sailendra/loopbackfile%d.img",d);
-		dev->backing_file[d] = filp_open(filename,O_RDWR , 0);
+		sprintf(filename , "/home/ashrutbobby/loopbackfile%d.img",d);
+		dev->disk_devs[d].backing_file = filp_open(filename,O_RDWR , 0);
+		dev->disk_devs[d].disk_thread = kthread_create(thread_foo, &dev->disk_devs[d], "thread");
+		wake_up_process(dev->disk_devs[d].disk_thread);
+		dev->disk_devs[d].num = d;
 	}
+	dev->disk_devs[0].req_event = req_event0;
+	dev->disk_devs[0].req_event = req_event1;
+	dev->disk_devs[0].req_event = req_event2;
 	// dev->backing_file[0] = filp_open("/home/dileep/loopbackfile0.img", O_RDWR, 0);
 	// dev->backing_file[1] = filp_open("/home/dileep/loopbackfile1.img", O_RDWR, 0);
 	// dev->backing_file[2] = filp_open("/home/dileep/loopbackfile2.img", O_RDWR, 0);
@@ -577,8 +628,8 @@ out_vfree:
 		vfree(dev->data);
 	int i;	
 	for(i=0;i<NUM_DISKS;++i){
-		if (dev->backing_file[i])
-			fput(dev->backing_file[i]);
+		if (dev->disk_devs[i].backing_file)
+			fput(dev->disk_devs[i].backing_file);
 	}		
 }
 
@@ -630,8 +681,8 @@ static void sbull_exit(void)
 			vfree(dev->data);
 		int j;	
 		for(j=0;j<NUM_DISKS;++j){
-			if (dev->backing_file[j])
-				fput(dev->backing_file[j]);
+			if (dev->disk_devs[j].backing_file)
+				fput(dev->disk_devs[j].backing_file);
 		}	
 	}
 	unregister_blkdev(sbull_major, "sbull");
