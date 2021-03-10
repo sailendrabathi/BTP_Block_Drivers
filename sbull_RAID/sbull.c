@@ -30,6 +30,7 @@
 #include <linux/uio.h>
 #include <linux/file.h>
 #include <linux/kthread.h>
+#include<linux/semaphore.h>
 
 MODULE_LICENSE("Dual BSD/GPL");
 
@@ -72,7 +73,7 @@ struct disk_dev{
 	struct file* backing_file;
 	int num;
 	// DECLARE_WAIT_QUEUE_HEAD(req_event);
-	// struct wait_queue_head req_event;
+	struct wait_queue_head req_event;
 };
 
 /*
@@ -92,6 +93,9 @@ struct sbull_dev {
 };
 
 static struct sbull_dev *Devices = NULL;
+
+spinlock_t req_lock;
+int bio_rem_count = 0;
 
 /**
 * See https://github.com/openzfs/zfs/pull/10187/
@@ -180,21 +184,30 @@ static int sbull_xfer_bio(struct file * backing_file, struct bio *bio)
 
 
 static DECLARE_WAIT_QUEUE_HEAD(req_event0);
+static DECLARE_WAIT_QUEUE_HEAD(req_event1);
 static int thread_foo(void *data){
-	struct bio *bio;
+	struct bio *bio_1;
 	struct disk_dev* ddev = (struct disk_dev *)data;
 	while(!kthread_should_stop()){
 		wait_event_interruptible(ddev->req_event,kthread_should_stop() || !bio_list_empty(&ddev->bio_list));
-		spin_lock_irq(&ddev->lock);
+		spin_lock(&ddev->lock);
         if (bio_list_empty(&ddev->bio_list))
         {
-            spin_unlock_irq(&ddev->lock);
+            spin_unlock(&ddev->lock);
             continue;
         }
 
-		bio = bio_list_pop(&ddev->bio_list);
-		spin_unlock_irq(&ddev->lock);
-		sbull_xfer_bio(ddev->backing_file, bio);
+		bio_1 = bio_list_pop(&ddev->bio_list);
+		spin_unlock(&ddev->lock);
+		sbull_xfer_bio(ddev->backing_file, bio_1);
+		bio_put(bio_1);
+		spin_lock(&req_lock);
+		bio_rem_count--;
+		printk(KERN_INFO "sbull_raid: bio_rem_count %d\n.", bio_rem_count);
+		if(bio_rem_count == 0){
+			wake_up(&req_event1);
+		}
+		spin_unlock(&req_lock);
 		printk(KERN_NOTICE "sbull_raid: threadfoo %d\n", ddev->num);
 	}
 	return 0;
@@ -275,12 +288,16 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 				n_sec = rem;
 				bio_1->bi_iter.bi_sector = sector_num;
 				
-				struct bio* temp1 = bio_clone_fast(bio_1 , GFP_NOIO , NULL);
+				// struct bio* temp1 = bio_clone_fast(bio_1 , GFP_NOIO , NULL);
 
 				// sbull_xfer_bio(dev->disk_devs[disk_num].backing_file, bio_1);
 				printk(KERN_NOTICE "sbull_raid: Bio for %d\n.", disk_num);
 				bio_list_add(&dev->disk_devs[disk_num].bio_list, bio_1);
 				wake_up(&dev->disk_devs[disk_num].req_event);
+				spin_lock(&req_lock);
+				bio_rem_count++;
+				printk(KERN_INFO "sbull_raid: bio_rem_count %d\n.", bio_rem_count);
+				spin_unlock(&req_lock);
 
 
 				// if(bio_data_dir(temp1) == WRITE){
@@ -291,19 +308,22 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 				// }
 
 
-				bio_put(temp1);
+				//bio_put(temp1);
 
 			}
 			else{
 				struct bio *bio_temp = bio_split(bio_1, n_sec, GFP_NOIO, NULL);
-				struct bio *bio_temp2 = bio_clone_fast(bio_temp , GFP_NOIO, NULL);
+				//struct bio *bio_temp2 = bio_clone_fast(bio_temp , GFP_NOIO, NULL);
 				bio_temp->bi_iter.bi_sector = sector_num;
 				// sbull_xfer_bio(dev->disk_devs[disk_num].backing_file, bio_temp);
 
 				printk(KERN_NOTICE "sbull_raid: Bio for %d\n.", disk_num);
 				bio_list_add(&dev->disk_devs[disk_num].bio_list, bio_temp);
 				wake_up(&dev->disk_devs[disk_num].req_event);
-				
+				spin_lock(&req_lock);
+				bio_rem_count++;
+				printk(KERN_INFO "sbull_raid: bio_rem_count %d\n.", bio_rem_count);
+				spin_unlock(&req_lock);
 
 				// if(bio_data_dir(bio_temp2) == WRITE) {
 				// 	printk(KERN_WARNING"Entering write");
@@ -311,8 +331,8 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 				// 	if(stat<0) printk("Parity set failed");
 				// }
 
-				bio_put(bio_temp);
-				bio_put(bio_temp2);
+				//bio_put(bio_temp);
+				//bio_put(bio_temp2);
 			}	
 
 			start_sector += n_sec;
@@ -320,10 +340,18 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 			rem -= n_sec;
 		}
 
-		bio_put(bio_1);
+		//bio_put(bio_1);
 		
 		nsect += bio->bi_iter.bi_size/KERNEL_SECTOR_SIZE;
 	}
+
+	spin_lock(&req_lock);
+	if(bio_rem_count>0){
+		spin_unlock(&req_lock);
+		wait_event_interruptible(req_event1,bio_rem_count==0);
+	}
+	spin_unlock(&req_lock);
+
 	return nsect;
 }
 
@@ -567,19 +595,13 @@ static void setup_device(struct sbull_dev *dev, int which)
 	int d;
 	for(d=0;d<NUM_DISKS;++d){
 		char filename[200];
-		sprintf(filename , "/home/ashrutbobby/loopbackfile%d.img",d);
+		sprintf(filename , "/home/sailendra/loopbackfile%d.img",d);
 		dev->disk_devs[d].backing_file = filp_open(filename,O_RDWR , 0);
 		dev->disk_devs[d].disk_thread = kthread_create(thread_foo, &dev->disk_devs[d], "thread");
 		wake_up_process(dev->disk_devs[d].disk_thread);
 		dev->disk_devs[d].num = d;
+		dev->disk_devs[d].req_event = req_event0;
 	}
-	dev->disk_devs[0].req_event = req_event0;
-	dev->disk_devs[0].req_event = req_event1;
-	dev->disk_devs[0].req_event = req_event2;
-	// dev->backing_file[0] = filp_open("/home/dileep/loopbackfile0.img", O_RDWR, 0);
-	// dev->backing_file[1] = filp_open("/home/dileep/loopbackfile1.img", O_RDWR, 0);
-	// dev->backing_file[2] = filp_open("/home/dileep/loopbackfile2.img", O_RDWR, 0);
-
 
 	spin_lock_init(&dev->lock);
 	
