@@ -213,7 +213,7 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 				n_sec = rem;
 				bio_1->bi_iter.bi_sector = sector_num;
 				
-				struct bio* temp1 = bio_clone_fast(bio_1 , GFP_NOIO , NULL);
+				// struct bio* temp1 = bio_clone_fast(bio_1 , GFP_NOIO , NULL);
 
 				
 
@@ -225,7 +225,7 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 			}
 			else{
 				struct bio *bio_temp = bio_split(bio_1, n_sec, GFP_NOIO, NULL);
-				struct bio *bio_temp2 = bio_clone_fast(bio_temp , GFP_NOIO, NULL);
+				//struct bio *bio_temp2 = bio_clone_fast(bio_temp , GFP_NOIO, NULL);
 				bio_temp->bi_iter.bi_sector = sector_num;
 
 				spin_lock(&(dev->disk_devs[disk_num].lock));
@@ -242,10 +242,10 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 			rem -= n_sec;
 			nsect += n_sec;
 		}
-		down(&barrier);
-	
 	}
-	
+	down(&barrier);
+
+
 	return nsect;
 }
 
