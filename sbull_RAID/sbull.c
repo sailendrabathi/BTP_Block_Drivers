@@ -235,17 +235,15 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 			}	
 
 			spin_lock(&lock3);
-				active_tasks++;
+			active_tasks++;
 			spin_unlock(&lock3);
 
 			start_sector += n_sec;
 			rem -= n_sec;
 			nsect += n_sec;
 		}
-		spin_lock(&lock3);
 		down(&barrier);
-		spin_unlock(&lock3);
-
+	
 	}
 	
 	return nsect;
@@ -444,16 +442,15 @@ static void setup_device(struct sbull_dev *dev, int which)
 	/*
 	 * Get some memory.
 	 */
+
+	printk(KERN_INFO "sbull: entered setup device");
 	memset (dev, 0, sizeof (struct sbull_dev));
 	dev->size = nsectors*hardsect_size;
-	// dev->data = vmalloc(dev->size);
-	/* need to chang
-	*/
 	
 	int d;
 	for(d=0;d<NUM_DISKS;++d){
 		char filename[200];
-		sprintf(filename , "/home/dileep/loopbackfile%d.img",d);
+		sprintf(filename , "/home/sailendra/loopbackfile%d.img",d);
 		dev->disk_devs[d].backing_file = filp_open(filename,O_RDWR , 0);
 		dev->disk_devs[d].disk_thread = kthread_create(thread_test,&dev->disk_devs[d],filename);
 		wake_up_process(dev->disk_devs[d].disk_thread);
