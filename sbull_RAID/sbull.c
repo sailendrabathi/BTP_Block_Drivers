@@ -48,13 +48,65 @@ module_param(ndevices, int, 0);
 #define INVALIDATE_DELAY	30*HZ
 
 
+struct my_bio{
+	struct my_bio* bi_next;
+	struct bio* bio;
+	int disk_num;
+	int parity_disk;
+};
+
+struct my_bio_list {
+	struct my_bio* head;
+	struct my_bio* tail;
+};
+
 struct disk_dev{
 	struct task_struct* disk_thread;
 	struct bio_list bio_list;
 	spinlock_t lock;
 	struct file* backing_file;
 	wait_queue_head_t req_event;
+	struct my_bio_list my_bio_list;
+	int num;
 };
+
+
+static inline int my_bio_list_empty(const struct my_bio_list *bl)
+{
+	return bl->head == NULL;
+}
+
+static inline void my_bio_list_init(struct my_bio_list *bl)
+{
+	bl->head = bl->tail = NULL;
+}
+
+static inline void my_bio_list_add(struct my_bio_list *bl, struct my_bio *bio)
+{
+	bio->bi_next = NULL;
+
+	if (bl->tail)
+		bl->tail->bi_next = bio;
+	else
+		bl->head = bio;
+
+	bl->tail = bio;
+}
+
+static inline struct my_bio *my_bio_list_pop(struct my_bio_list *bl)
+{
+	struct my_bio *bio = bl->head;
+
+	if (bio) {
+		bl->head = bl->head->bi_next;
+		if (!bl->head)
+			bl->tail = NULL;
+
+		bio->bi_next = NULL;
+	}
+
+	return bio;
+}
 
 /*
  * The internal representation of our device.
@@ -120,7 +172,7 @@ static int lo_write_bvec(struct file *file, struct bio_vec *bvec, loff_t *ppos)
 static int sbull_xfer_bio(struct file * backing_file, struct bio *bio)
 {
 	
-	printk(KERN_INFO "sbull_xfer_bio");
+	// printk(KERN_INFO "sbull_xfer_bio");
 	struct bio_vec bvec;
 	struct bvec_iter iter;
 	struct iov_iter i;
@@ -154,23 +206,20 @@ struct semaphore barrier =  __SEMAPHORE_INITIALIZER(barrier, 0);
 int active_tasks = 0;
 
 static int thread_test(void *data){
-	struct bio *bio;
 	struct disk_dev* ddev = (struct disk_dev*)data;
-	
+	struct my_bio *mb;
 	while(!kthread_should_stop()) {
-		wait_event_interruptible(ddev->req_event,kthread_should_stop() || !bio_list_empty(&(ddev->bio_list)));
+		wait_event_interruptible(ddev->req_event,kthread_should_stop() || !my_bio_list_empty(&(ddev->my_bio_list)));
 		spin_lock(&(ddev->lock));
-        if (bio_list_empty(&(ddev->bio_list)))
+        if (my_bio_list_empty(&(ddev->my_bio_list)))
         {
             spin_unlock(&(ddev->lock));
             continue;
         }
-		bio = bio_list_pop(&(ddev->bio_list));
+
+		mb = my_bio_list_pop(&(ddev->my_bio_list));
 		spin_unlock(&(ddev->lock));
-		unsigned int start_sector = bio->bi_iter.bi_sector;
-		unsigned int rem = bio->bi_iter.bi_size / KERNEL_SECTOR_SIZE;
-		printk(KERN_NOTICE "sbull_raid: threadtest:%u\n",start_sector);
-		sbull_xfer_bio(ddev->backing_file, bio);
+		sbull_xfer_bio(ddev->backing_file, mb->bio);
 		spin_lock(&lock3);
 		active_tasks--;
 		if(active_tasks == 0) up(&barrier);
@@ -209,30 +258,24 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 			unsigned int n_sec = CHUNK_IN_SECTORS - (sector_num % CHUNK_IN_SECTORS);
 			if(parity_disk <= disk_num) disk_num++;
 
+			struct my_bio* mb = kmalloc(sizeof(struct my_bio), GFP_KERNEL);
+			mb->disk_num = disk_num;
+			mb->parity_disk = parity_disk;
 			if(rem <= n_sec){
 				n_sec = rem;
 				bio_1->bi_iter.bi_sector = sector_num;
-				
-				// struct bio* temp1 = bio_clone_fast(bio_1 , GFP_NOIO , NULL);
-
-				
-
-				spin_lock(&(dev->disk_devs[disk_num].lock));
-				bio_list_add(&(dev->disk_devs[disk_num].bio_list), bio_1);
-				wake_up(&dev->disk_devs[disk_num].req_event);
-				spin_unlock(&(dev->disk_devs[disk_num].lock));
-
+				mb->bio = bio_1;
 			}
 			else{
 				struct bio *bio_temp = bio_split(bio_1, n_sec, GFP_NOIO, NULL);
-				//struct bio *bio_temp2 = bio_clone_fast(bio_temp , GFP_NOIO, NULL);
 				bio_temp->bi_iter.bi_sector = sector_num;
-
-				spin_lock(&(dev->disk_devs[disk_num].lock));
-				bio_list_add(&(dev->disk_devs[disk_num].bio_list), bio_temp);
-				wake_up(&dev->disk_devs[disk_num].req_event);
-				spin_unlock(&(dev->disk_devs[disk_num].lock));
-			}	
+				mb->bio = bio_temp;
+			}
+			
+			spin_lock(&(dev->disk_devs[disk_num].lock));
+			my_bio_list_add(&(dev->disk_devs[disk_num].my_bio_list), mb);
+			wake_up(&dev->disk_devs[disk_num].req_event);
+			spin_unlock(&(dev->disk_devs[disk_num].lock));
 
 			spin_lock(&lock3);
 			active_tasks++;
@@ -450,13 +493,16 @@ static void setup_device(struct sbull_dev *dev, int which)
 	int d;
 	for(d=0;d<NUM_DISKS;++d){
 		char filename[200];
-		sprintf(filename , "/home/sailendra/loopbackfile%d.img",d);
+		sprintf(filename , "/home/ashrutbobby/loopbackfile%d.img",d);
 		dev->disk_devs[d].backing_file = filp_open(filename,O_RDWR , 0);
 		dev->disk_devs[d].disk_thread = kthread_create(thread_test,&dev->disk_devs[d],filename);
+		dev->disk_devs[d].num = d;
+		my_bio_list_init(&dev->disk_devs[d].my_bio_list);
 		wake_up_process(dev->disk_devs[d].disk_thread);
 		init_waitqueue_head(&dev->disk_devs[d].req_event);
 		spin_lock_init(&dev->disk_devs[d].lock);
 	}
+
 	
 	/*
 	 * The timer which "invalidates" the device.
