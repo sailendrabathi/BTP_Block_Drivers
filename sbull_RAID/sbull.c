@@ -71,6 +71,20 @@ struct disk_dev{
 };
 
 
+struct par_dev{
+	struct par_dev *bi_next;
+	char *diskbuf;
+	int disk_num;
+	int parity_disk;
+	loff_t pos;
+	unsigned int bv_len;
+};
+
+struct par_list {
+	struct par_dev* head;
+	struct par_dev* tail;
+};
+
 static inline int my_bio_list_empty(const struct my_bio_list *bl)
 {
 	return bl->head == NULL;
@@ -107,6 +121,45 @@ static inline struct my_bio *my_bio_list_pop(struct my_bio_list *bl)
 
 	return bio;
 }
+
+
+static inline int par_list_empty(const struct par_list *bl)
+{
+	return bl->head == NULL;
+}
+
+static inline void par_list_init(struct par_list *bl)
+{
+	bl->head = bl->tail = NULL;
+}
+
+static inline void par_list_add(struct par_list *bl, struct par_dev *bio)
+{
+	bio->bi_next = NULL;
+
+	if (bl->tail)
+		bl->tail->bi_next = bio;
+	else
+		bl->head = bio;
+
+	bl->tail = bio;
+}
+
+static inline struct par_dev *par_list_pop(struct par_list *bl)
+{
+	struct par_dev *bio = bl->head;
+
+	if (bio) {
+		bl->head = bl->head->bi_next;
+		if (!bl->head)
+			bl->tail = NULL;
+
+		bio->bi_next = NULL;
+	}
+
+	return bio;
+}
+
 
 /*
  * The internal representation of our device.
@@ -205,7 +258,13 @@ DEFINE_SPINLOCK(lock3);
 struct semaphore barrier =  __SEMAPHORE_INITIALIZER(barrier, 0);
 int active_tasks = 0;
 
+
+struct par_list my_list;
+wait_queue_head_t par_req_event;
+spinlock_t par_lock;
+
 static int thread_test(void *data){
+	struct bio* bio;
 	struct disk_dev* ddev = (struct disk_dev*)data;
 	struct my_bio *mb;
 	while(!kthread_should_stop()) {
@@ -216,10 +275,43 @@ static int thread_test(void *data){
             spin_unlock(&(ddev->lock));
             continue;
         }
-
 		mb = my_bio_list_pop(&(ddev->my_bio_list));
+		bio = mb->bio;
+
+		if(bio_data_dir(bio) == WRITE){
+			struct bio_vec bvec;
+			struct bvec_iter iter;
+			loff_t pos = ((bio->bi_iter.bi_sector)*KERNEL_SECTOR_SIZE);
+			ssize_t len;
+			bio_for_each_segment(bvec,bio,iter){
+				char newbuf[bvec.bv_len+1];
+				char *written = kmap_atomic(bvec.bv_page);
+				char *buffstart = written + bvec.bv_offset;
+				unsigned int k;
+				for(k=0; k<bvec.bv_len; k++)
+					newbuf[k] = buffstart[k];
+				kunmap_atomic(written);
+				char oldbuf[bvec.bv_len+1];
+				loff_t temppos = pos;
+				len = kernel_read(ddev->backing_file , (void __user *) oldbuf ,bvec.bv_len , &temppos);
+				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
+				for(k=0; k<bvec.bv_len; k++)
+					newbuf[k] = newbuf[k]^oldbuf[k];
+				struct par_dev *pdev = kmalloc(sizeof(struct par_dev), GFP_KERNEL);
+				pdev->diskbuf = newbuf;
+				pdev->pos = pos;
+				pdev->disk_num = mb->disk_num;
+				pdev->parity_disk = mb->parity_disk;
+				pdev->bv_len = bvec.bv_len;
+				spin_lock(&par_lock);
+				par_list_add(&my_list,pdev);
+				wake_up(&par_req_event);
+				spin_unlock(&par_lock);
+			}
+		}
+
 		spin_unlock(&(ddev->lock));
-		sbull_xfer_bio(ddev->backing_file, mb->bio);
+		sbull_xfer_bio(ddev->backing_file, bio);
 		spin_lock(&lock3);
 		active_tasks--;
 		if(active_tasks == 0) up(&barrier);
@@ -227,6 +319,38 @@ static int thread_test(void *data){
 	}
 	return 0;
 }
+
+
+static int parity_thread(void *data){
+	struct par_dev *pdev;
+	struct sbull_dev* dev = (struct sbull_dev*)data;
+	while(!kthread_should_stop()) {
+		wait_event_interruptible(par_req_event,kthread_should_stop() || !par_list_empty(&(my_list)));
+		spin_lock(&(par_lock));
+        if (par_list_empty(&(my_list)))
+        {
+            spin_unlock(&(par_lock));
+            continue;
+        }
+		pdev = par_list_pop(&(my_list));
+		spin_unlock(&(par_lock));
+
+		char parbuf[pdev->bv_len+1];
+		loff_t temppos1 = pdev->pos;
+		ssize_t len;
+		len = kernel_read(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) parbuf ,pdev->bv_len , &temppos1);
+		if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
+		int k;
+		for(k=0; k<pdev->bv_len; k++)
+			parbuf[k] = parbuf[k]^pdev->diskbuf[k];
+		loff_t pos = pdev->pos;
+		printk(KERN_NOTICE "sbull_raid: parity check\n");
+		len = kernel_write(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) parbuf, pdev->bv_len , &pos);
+		if(len<0) printk(KERN_INFO "Parity : kernel_write failed");
+	}
+	return 0;
+}
+
 
 /*
  * Transfer a full request.
@@ -502,8 +626,11 @@ static void setup_device(struct sbull_dev *dev, int which)
 		init_waitqueue_head(&dev->disk_devs[d].req_event);
 		spin_lock_init(&dev->disk_devs[d].lock);
 	}
+	struct task_struct* par_thread = kthread_create(parity_thread,dev,"parity_thread");
+	wake_up_process(par_thread);
+	init_waitqueue_head(&par_req_event);
+	spin_lock_init(&par_lock);
 
-	
 	/*
 	 * The timer which "invalidates" the device.
 	 */
