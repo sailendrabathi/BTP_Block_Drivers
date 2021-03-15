@@ -31,12 +31,12 @@ struct disk_dev{
 
 
 struct par_dev{
-	struct par_dev *bi_next;
-	char *diskbuf;
+	struct par_dev* bi_next;
+	struct bio* par_bio;
 	int disk_num;
 	int parity_disk;
-	loff_t pos;
-	unsigned int bv_len;
+	struct semaphore par_lock;
+	bool flag;
 };
 
 struct par_list {

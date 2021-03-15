@@ -154,6 +154,9 @@ static int thread_test(void *data){
 	struct bio* bio;
 	struct disk_dev* ddev = (struct disk_dev*)data;
 	struct my_bio *mb;
+
+	struct par_dev *pdev = kmalloc(sizeof(struct par_dev), GFP_KERNEL);
+
 	while(!kthread_should_stop()) {
 		wait_event_interruptible(ddev->req_event,kthread_should_stop() || !my_bio_list_empty(&(ddev->my_bio_list)));
 		spin_lock(&(ddev->lock));
@@ -165,40 +168,31 @@ static int thread_test(void *data){
 		mb = my_bio_list_pop(&(ddev->my_bio_list));
 		bio = mb->bio;
 
-		if(bio_data_dir(bio) == WRITE){
-			struct bio_vec bvec;
-			struct bvec_iter iter;
-			loff_t pos = ((bio->bi_iter.bi_sector)*KERNEL_SECTOR_SIZE);
-			ssize_t len;
-			bio_for_each_segment(bvec,bio,iter){
-				char newbuf[bvec.bv_len+1];
-				char *written = kmap_atomic(bvec.bv_page);
-				char *buffstart = written + bvec.bv_offset;
-				unsigned int k;
-				for(k=0; k<bvec.bv_len; k++)
-					newbuf[k] = buffstart[k];
-				kunmap_atomic(written);
-				char oldbuf[bvec.bv_len+1];
-				loff_t temppos = pos;
-				len = kernel_read(ddev->backing_file , (void __user *) oldbuf ,bvec.bv_len , &temppos);
-				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
-				for(k=0; k<bvec.bv_len; k++)
-					newbuf[k] = newbuf[k]^oldbuf[k];
-				struct par_dev *pdev = kmalloc(sizeof(struct par_dev), GFP_KERNEL);
-				pdev->diskbuf = newbuf;
-				pdev->pos = pos;
-				pdev->disk_num = mb->disk_num;
-				pdev->parity_disk = mb->parity_disk;
-				pdev->bv_len = bvec.bv_len;
-				spin_lock(&par_lock);
-				par_list_add(&my_list,pdev);
-				wake_up(&par_req_event);
-				spin_unlock(&par_lock);
-			}
-		}
-
 		spin_unlock(&(ddev->lock));
+		
 		sbull_xfer_bio(ddev->backing_file, bio);
+
+		pdev->par_bio = bio;
+		pdev->disk_num = mb->disk_num;
+		pdev->parity_disk = mb->parity_disk;
+		sema_init(&pdev->par_lock, 0);
+		pdev->flag = false;
+
+		spin_lock(&par_lock);
+		par_list_add(&my_list,pdev);
+		wake_up(&par_req_event);
+		spin_unlock(&par_lock);
+
+		down(&pdev->par_lock);
+		if(bio_data_dir(bio) == READ){
+			if(pdev->flag){
+				printk(KERN_INFO "parity matched");
+			}
+			else{
+				printk(KERN_INFO "parity not matched");
+			}
+		}		
+		
 		bio_put(bio);
 		kfree(mb);
 		spin_lock(&lock3);
@@ -206,12 +200,16 @@ static int thread_test(void *data){
 		if(active_tasks == 0) up(&barrier);
 		spin_unlock(&lock3);
 	}
+	printk(KERN_INFO "sbull: freeing pdev %d", ddev->num);
+	kfree(pdev);
+
 	return 0;
 }
 
 
 static int parity_thread(void *data){
 	struct par_dev *pdev;
+	struct bio* bio;
 	struct sbull_dev* dev = (struct sbull_dev*)data;
 	while(!kthread_should_stop()) {
 		wait_event_interruptible(par_req_event,kthread_should_stop() || !par_list_empty(&(my_list)));
@@ -224,19 +222,95 @@ static int parity_thread(void *data){
 		pdev = par_list_pop(&(my_list));
 		spin_unlock(&(par_lock));
 
-		char parbuf[pdev->bv_len+1];
-		loff_t temppos1 = pdev->pos;
-		ssize_t len;
-		len = kernel_read(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) parbuf ,pdev->bv_len , &temppos1);
-		if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
-		int k;
-		for(k=0; k<pdev->bv_len; k++)
-			parbuf[k] = parbuf[k]^pdev->diskbuf[k];
-		loff_t pos = pdev->pos;
+		bio = pdev->par_bio;
 		printk(KERN_NOTICE "sbull_raid: parity check\n");
-		len = kernel_write(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) parbuf, pdev->bv_len , &pos);
-		if(len<0) printk(KERN_INFO "Parity : kernel_write failed");
-		kfree(pdev);
+
+		
+		struct bio_vec bvec;
+		struct bvec_iter iter;
+		loff_t pos = ((bio->bi_iter.bi_sector)*KERNEL_SECTOR_SIZE);
+		ssize_t len;
+		if(bio_data_dir(bio) == WRITE){
+			bio_for_each_segment(bvec,bio,iter){
+				printk(KERN_NOTICE "sbull_raid: parity check_1\n");
+
+				char newbuf[bvec.bv_len+1];
+				char *written = kmap_atomic(bvec.bv_page);
+				char *buffstart = written + bvec.bv_offset;
+				unsigned int k;
+				for(k=0; k<bvec.bv_len; k++)
+					newbuf[k] = buffstart[k];
+				kunmap_atomic(written);
+				char oldbuf[bvec.bv_len+1];
+				loff_t temppos = pos;
+				len = kernel_read(dev->disk_devs[pdev->disk_num].backing_file , (void __user *) oldbuf ,bvec.bv_len , &temppos);
+				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
+				for(k=0; k<bvec.bv_len; k++)
+					newbuf[k] = newbuf[k]^oldbuf[k];
+				
+				char parbuf[bvec.bv_len+1];
+				temppos = pos;
+				len = kernel_read(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) parbuf ,bvec.bv_len , &temppos);
+				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
+				for(k=0; k<bvec.bv_len; k++)
+					parbuf[k] = parbuf[k]^newbuf[k];
+				
+				temppos = pos;
+				len = kernel_write(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) parbuf,bvec.bv_len , &temppos);
+				if(len<0) printk(KERN_INFO "Parity : kernel_write failed");
+
+				pos = temppos;	
+			}
+		}
+		else{
+			bool final_flag = true; 
+
+			bio_for_each_segment(bvec,bio,iter){
+				printk(KERN_NOTICE "sbull_raid: parity check_2\n");
+
+				char databuf[bvec.bv_len+1];
+
+				loff_t temppos = pos;
+				len = kernel_read(dev->disk_devs[pdev->disk_num].backing_file , (void __user *) databuf ,bvec.bv_len , &temppos);
+				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
+				
+				int d;
+				unsigned int k;
+				for(d=0;d<NUM_DISKS;++d){
+					if(d == pdev->parity_disk || d==pdev->disk_num) continue;
+					
+					char tempbuf[bvec.bv_len+1];
+					temppos = pos;
+					len = kernel_read(dev->disk_devs[d].backing_file , (void __user *) tempbuf ,bvec.bv_len , &temppos);
+					if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
+				
+					for(k=0; k<bvec.bv_len; k++)
+						databuf[k] = databuf[k]^tempbuf[k];
+
+				}
+				
+				char parbuf[bvec.bv_len+1];
+				temppos = pos;
+				len = kernel_read(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) parbuf ,bvec.bv_len , &temppos);
+				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
+				
+				bool flag = true;
+				for(k=0; k<bvec.bv_len; k++){
+					if(parbuf[k] != databuf[k]){
+						flag = false;
+						break;
+					}
+				}
+
+				final_flag = final_flag && flag;
+			
+				pos = temppos;	
+			}
+
+			pdev->flag = final_flag;
+		}
+
+		up(&pdev->par_lock);
 	}
 	return 0;
 }
