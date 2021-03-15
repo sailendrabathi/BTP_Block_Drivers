@@ -23,6 +23,7 @@
 #include <linux/kthread.h>
 #include <linux/wait.h>
 #include <linux/semaphore.h>
+#include "utils.h"
 
 MODULE_LICENSE("Dual BSD/GPL");
 
@@ -46,120 +47,6 @@ module_param(ndevices, int, 0);
 #define NUM_DISKS 3
 
 #define INVALIDATE_DELAY	30*HZ
-
-
-struct my_bio{
-	struct my_bio* bi_next;
-	struct bio* bio;
-	int disk_num;
-	int parity_disk;
-};
-
-struct my_bio_list {
-	struct my_bio* head;
-	struct my_bio* tail;
-};
-
-struct disk_dev{
-	struct task_struct* disk_thread;
-	struct bio_list bio_list;
-	spinlock_t lock;
-	struct file* backing_file;
-	wait_queue_head_t req_event;
-	struct my_bio_list my_bio_list;
-	int num;
-};
-
-
-struct par_dev{
-	struct par_dev *bi_next;
-	char *diskbuf;
-	int disk_num;
-	int parity_disk;
-	loff_t pos;
-	unsigned int bv_len;
-};
-
-struct par_list {
-	struct par_dev* head;
-	struct par_dev* tail;
-};
-
-static inline int my_bio_list_empty(const struct my_bio_list *bl)
-{
-	return bl->head == NULL;
-}
-
-static inline void my_bio_list_init(struct my_bio_list *bl)
-{
-	bl->head = bl->tail = NULL;
-}
-
-static inline void my_bio_list_add(struct my_bio_list *bl, struct my_bio *bio)
-{
-	bio->bi_next = NULL;
-
-	if (bl->tail)
-		bl->tail->bi_next = bio;
-	else
-		bl->head = bio;
-
-	bl->tail = bio;
-}
-
-static inline struct my_bio *my_bio_list_pop(struct my_bio_list *bl)
-{
-	struct my_bio *bio = bl->head;
-
-	if (bio) {
-		bl->head = bl->head->bi_next;
-		if (!bl->head)
-			bl->tail = NULL;
-
-		bio->bi_next = NULL;
-	}
-
-	return bio;
-}
-
-
-static inline int par_list_empty(const struct par_list *bl)
-{
-	return bl->head == NULL;
-}
-
-static inline void par_list_init(struct par_list *bl)
-{
-	bl->head = bl->tail = NULL;
-}
-
-static inline void par_list_add(struct par_list *bl, struct par_dev *bio)
-{
-	bio->bi_next = NULL;
-
-	if (bl->tail)
-		bl->tail->bi_next = bio;
-	else
-		bl->head = bio;
-
-	bl->tail = bio;
-}
-
-static inline struct par_dev *par_list_pop(struct par_list *bl)
-{
-	struct par_dev *bio = bl->head;
-
-	if (bio) {
-		bl->head = bl->head->bi_next;
-		if (!bl->head)
-			bl->tail = NULL;
-
-		bio->bi_next = NULL;
-	}
-
-	return bio;
-}
-
 
 /*
  * The internal representation of our device.
@@ -312,6 +199,8 @@ static int thread_test(void *data){
 
 		spin_unlock(&(ddev->lock));
 		sbull_xfer_bio(ddev->backing_file, bio);
+		bio_put(bio);
+		kfree(mb);
 		spin_lock(&lock3);
 		active_tasks--;
 		if(active_tasks == 0) up(&barrier);
@@ -347,6 +236,7 @@ static int parity_thread(void *data){
 		printk(KERN_NOTICE "sbull_raid: parity check\n");
 		len = kernel_write(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) parbuf, pdev->bv_len , &pos);
 		if(len<0) printk(KERN_INFO "Parity : kernel_write failed");
+		kfree(pdev);
 	}
 	return 0;
 }
@@ -617,7 +507,7 @@ static void setup_device(struct sbull_dev *dev, int which)
 	int d;
 	for(d=0;d<NUM_DISKS;++d){
 		char filename[200];
-		sprintf(filename , "/home/ashrutbobby/loopbackfile%d.img",d);
+		sprintf(filename , "/home/sailendra/loopbackfile%d.img",d);
 		dev->disk_devs[d].backing_file = filp_open(filename,O_RDWR , 0);
 		dev->disk_devs[d].disk_thread = kthread_create(thread_test,&dev->disk_devs[d],filename);
 		dev->disk_devs[d].num = d;
