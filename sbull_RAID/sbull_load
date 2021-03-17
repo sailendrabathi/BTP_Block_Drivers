@@ -25,11 +25,12 @@ else
 fi
 
 NUM_DISKS=3
-USERNAME="sailendra"
+USERNAME="ashrutbobby"
 rm -f /home/$USERNAME/loopbackfile*
 for ((i=0;i<NUM_DISKS;i++));
 do
-    touch /home/$USERNAME/loopbackfile$i.img
+    # touch /home/$USERNAME/loopbackfile$i.img
+    dd if=/dev/zero of=/home/$USERNAME/loopbackfile$i.img bs=5M count=10
 done
 
 

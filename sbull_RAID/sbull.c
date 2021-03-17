@@ -170,7 +170,6 @@ static int thread_test(void *data){
 
 		spin_unlock(&(ddev->lock));
 		
-		sbull_xfer_bio(ddev->backing_file, bio);
 
 		pdev->par_bio = bio;
 		pdev->disk_num = mb->disk_num;
@@ -184,11 +183,9 @@ static int thread_test(void *data){
 		spin_unlock(&par_lock);
 
 		down(&pdev->par_lock);
+		sbull_xfer_bio(ddev->backing_file, bio);
 		if(bio_data_dir(bio) == READ){
-			if(pdev->flag){
-				printk(KERN_INFO "parity matched");
-			}
-			else{
+			if(!pdev->flag){
 				printk(KERN_INFO "parity not matched");
 			}
 		}		
@@ -223,7 +220,7 @@ static int parity_thread(void *data){
 		spin_unlock(&(par_lock));
 
 		bio = pdev->par_bio;
-		printk(KERN_NOTICE "sbull_raid: parity check\n");
+		// printk(KERN_NOTICE "sbull_raid: parity check\n");
 
 		
 		struct bio_vec bvec;
@@ -232,7 +229,7 @@ static int parity_thread(void *data){
 		ssize_t len;
 		if(bio_data_dir(bio) == WRITE){
 			bio_for_each_segment(bvec,bio,iter){
-				printk(KERN_NOTICE "sbull_raid: parity check_1\n");
+				// printk(KERN_NOTICE "sbull_raid: parity check_1\n");
 
 				char newbuf[bvec.bv_len+1];
 				char *written = kmap_atomic(bvec.bv_page);
@@ -266,7 +263,7 @@ static int parity_thread(void *data){
 			bool final_flag = true; 
 
 			bio_for_each_segment(bvec,bio,iter){
-				printk(KERN_NOTICE "sbull_raid: parity check_2\n");
+				// printk(KERN_NOTICE "sbull_raid: parity check_2\n");
 
 				char databuf[bvec.bv_len+1];
 
@@ -324,7 +321,7 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 	struct bio *bio;
 	int nsect = 0;
     
-	printk(KERN_INFO "sbull_xfer_request");
+	// printk(KERN_INFO "sbull_xfer_request");
 
 	__rq_for_each_bio(bio, req){
 		struct bio* bio_1 = bio_clone_fast(bio, GFP_NOIO, NULL);
@@ -393,7 +390,7 @@ static blk_status_t sbull_full_request(struct blk_mq_hw_ctx * hctx, const struct
 	blk_status_t  ret;
 
 
-	printk(KERN_INFO "sbull_full_request");
+	// printk(KERN_INFO "sbull_full_request");
 
 
 	blk_mq_start_request (req);
@@ -581,7 +578,7 @@ static void setup_device(struct sbull_dev *dev, int which)
 	int d;
 	for(d=0;d<NUM_DISKS;++d){
 		char filename[200];
-		sprintf(filename , "/home/sailendra/loopbackfile%d.img",d);
+		sprintf(filename , "/home/ashrutbobby/loopbackfile%d.img",d);
 		dev->disk_devs[d].backing_file = filp_open(filename,O_RDWR , 0);
 		dev->disk_devs[d].disk_thread = kthread_create(thread_test,&dev->disk_devs[d],filename);
 		dev->disk_devs[d].num = d;
