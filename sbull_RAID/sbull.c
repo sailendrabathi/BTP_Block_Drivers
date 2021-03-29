@@ -343,6 +343,9 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 			unsigned int n_sec = CHUNK_IN_SECTORS - (sector_num % CHUNK_IN_SECTORS);
 			if(parity_disk <= disk_num) disk_num++;
 
+
+			printk(KERN_INFO"disknum: %d, stripe_index %d", disk_num, stripe_index);
+
 			struct my_bio* mb = kmalloc(sizeof(struct my_bio), GFP_KERNEL);
 			mb->disk_num = disk_num;
 			mb->parity_disk = parity_disk;
@@ -578,7 +581,7 @@ static void setup_device(struct sbull_dev *dev, int which)
 	int d;
 	for(d=0;d<NUM_DISKS;++d){
 		char filename[200];
-		sprintf(filename , "/home/ashrutbobby/loopbackfile%d.img",d);
+		sprintf(filename , "/home/sailendra/loopbackfile%d.img",d);
 		dev->disk_devs[d].backing_file = filp_open(filename,O_RDWR , 0);
 		dev->disk_devs[d].disk_thread = kthread_create(thread_test,&dev->disk_devs[d],filename);
 		dev->disk_devs[d].num = d;
