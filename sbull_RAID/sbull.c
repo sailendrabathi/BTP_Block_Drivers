@@ -52,7 +52,7 @@ module_param(ndevices, int, 0);
  * The internal representation of our device.
  */
 struct sbull_dev {
-	int size;                       /* Device size in sectors */
+	unsigned int size;                       /* Device size in sectors */
 	u8 *data;                       /* The data array */
 	short users;                    /* How many users */
 	short media_change;             /* Flag a media change? */
@@ -143,7 +143,7 @@ static int sbull_xfer_bio(struct file * backing_file, struct bio *bio)
 
 DEFINE_SPINLOCK(lock3);
 struct semaphore barrier =  __SEMAPHORE_INITIALIZER(barrier, 0);
-int active_tasks = 0;
+unsigned int active_tasks = 0;
 
 
 struct par_list my_list;
@@ -170,6 +170,7 @@ static int thread_test(void *data){
 
 		spin_unlock(&(ddev->lock));
 		
+		// printk(KERN_INFO "my bio start %d",  ddev->num);
 
 		pdev->par_bio = bio;
 		pdev->disk_num = mb->disk_num;
@@ -182,7 +183,9 @@ static int thread_test(void *data){
 		wake_up(&par_req_event);
 		spin_unlock(&par_lock);
 
+		// printk(KERN_INFO "waiting on par_lock %d", ddev->num);
 		down(&pdev->par_lock);
+		// printk(KERN_INFO "woke up on par_lock %d", ddev->num);
 		sbull_xfer_bio(ddev->backing_file, bio);
 		if(bio_data_dir(bio) == READ){
 			if(!pdev->flag){
@@ -196,6 +199,8 @@ static int thread_test(void *data){
 		active_tasks--;
 		if(active_tasks == 0) up(&barrier);
 		spin_unlock(&lock3);
+
+		// printk(KERN_INFO "my bio done %d",  ddev->num);
 	}
 	printk(KERN_INFO "sbull: freeing pdev %d", ddev->num);
 	kfree(pdev);
@@ -226,7 +231,7 @@ static int parity_thread(void *data){
 		struct bio_vec bvec;
 		struct bvec_iter iter;
 		loff_t pos = ((bio->bi_iter.bi_sector)*KERNEL_SECTOR_SIZE);
-		ssize_t len;
+		unsigned int len;
 		if(bio_data_dir(bio) == WRITE){
 			bio_for_each_segment(bvec,bio,iter){
 				// printk(KERN_NOTICE "sbull_raid: parity check_1\n");
@@ -319,9 +324,8 @@ static int parity_thread(void *data){
 static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 {
 	struct bio *bio;
-	int nsect = 0;
-    
-	// printk(KERN_INFO "sbull_xfer_request");
+	unsigned int nsect = 0;
+    printk(KERN_INFO "entered sbull_xfer_request");
 
 	__rq_for_each_bio(bio, req){
 		struct bio* bio_1 = bio_clone_fast(bio, GFP_NOIO, NULL);
@@ -376,6 +380,7 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 	}
 	down(&barrier);
 
+	printk(KERN_INFO "exiting sbull_xfer_request");
 
 	return nsect;
 }
@@ -388,7 +393,7 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 static blk_status_t sbull_full_request(struct blk_mq_hw_ctx * hctx, const struct blk_mq_queue_data * bd)
 {
 	struct request *req = bd->rq;
-	int sectors_xferred;
+	unsigned int sectors_xferred;
 	struct sbull_dev *dev = req->q->queuedata;
 	blk_status_t  ret;
 
@@ -450,6 +455,7 @@ static int sbull_open(struct block_device *bdev, fmode_t mode)
 
 static void sbull_release(struct gendisk *disk, fmode_t mode)
 {
+	printk(KERN_INFO "file_sbull: entered sbull_release.\n");
 	struct sbull_dev *dev = disk->private_data;
 
 	spin_lock(&dev->lock);
@@ -630,6 +636,7 @@ static void setup_device(struct sbull_dev *dev, int which)
 	snprintf (dev->gd->disk_name, 32, "sbull%c", which + 'a');
 	set_capacity(dev->gd, nsectors*(hardsect_size/KERNEL_SECTOR_SIZE));
 	add_disk(dev->gd);
+	printk(KERN_INFO "sbull: exiting setup device");
 	return;
 
 out_vfree:

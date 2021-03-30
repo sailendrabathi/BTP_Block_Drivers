@@ -2,7 +2,7 @@ import threading
 import hashlib
 import shutil
 
-file = "/home/sailendra/test.txt"
+file = "/home/sailendra/sbull_test/test.txt"
 
 
 def compute_md5(file_name):
@@ -87,8 +87,8 @@ def task(offset, fl):
 	print("Test passed")
 
 
-f1 = "/home/sailendra/test1.txt"
-f2 = "/home/sailendra/test2.txt"
+f1 = "/home/sailendra/sbull_test/test1.txt"
+f2 = "/home/sailendra/sbull_test/test2.txt"
 
 t1 = threading.Thread(target=task,  args=(50,f1), name="t1")
 t2 = threading.Thread(target=task,  args=(100,f2), name="t2")
@@ -103,7 +103,7 @@ t2.join()
 print("4.Stress testing single process and large IO.")
 
 big_file_src = "512KB_file.jpg"
-big_file_dest = "/home/sailendra/512KB_file.jpg"
+big_file_dest = "/home/sailendra/sbull_test/512KB_file.jpg"
 
 shutil.copyfile(big_file_src,big_file_dest)
 
@@ -117,8 +117,8 @@ else:
 
 print("5.Stress testing multiple processes and large IO.")
 
-big_file_dest1 = "/home/sailendra/512KB_file1.jpg"
-big_file_dest2 = "/home/sailendra/512KB_file2.jpg"
+big_file_dest1 = "/home/sailendra/sbull_test/512KB_file1.jpg"
+big_file_dest2 = "/home/sailendra/sbull_test/512KB_file2.jpg"
 
 t1 = threading.Thread(target=shutil.copyfile,  args=(big_file_src,big_file_dest1), name="t1")
 t2 = threading.Thread(target=shutil.copyfile,  args=(big_file_src,big_file_dest2), name="t2")
