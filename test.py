@@ -100,42 +100,42 @@ t1.join()
 t2.join()
 
 
-print("4.Stress testing single process and large IO.")
+# print("4.Stress testing single process and large IO.")
 
-big_file_src = "512KB_file.jpg"
-big_file_dest = "/home/sailendra/sbull_test/512KB_file.jpg"
+# big_file_src = "512KB_file.jpg"
+# big_file_dest = "/home/sailendra/sbull_test/512KB_file.jpg"
 
-shutil.copyfile(big_file_src,big_file_dest)
+# shutil.copyfile(big_file_src,big_file_dest)
 
-src_hash = compute_md5(big_file_src)
-dest_hash = compute_md5(big_file_dest)
+# src_hash = compute_md5(big_file_src)
+# dest_hash = compute_md5(big_file_dest)
 
-if(src_hash == dest_hash):
-	print("Test passed")
-else:
-	print("Test failed")	
+# if(src_hash == dest_hash):
+# 	print("Test passed")
+# else:
+# 	print("Test failed")	
 
-print("5.Stress testing multiple processes and large IO.")
+# print("5.Stress testing multiple processes and large IO.")
 
-big_file_dest1 = "/home/sailendra/sbull_test/512KB_file1.jpg"
-big_file_dest2 = "/home/sailendra/sbull_test/512KB_file2.jpg"
+# big_file_dest1 = "/home/sailendra/sbull_test/512KB_file1.jpg"
+# big_file_dest2 = "/home/sailendra/sbull_test/512KB_file2.jpg"
 
-t1 = threading.Thread(target=shutil.copyfile,  args=(big_file_src,big_file_dest1), name="t1")
-t2 = threading.Thread(target=shutil.copyfile,  args=(big_file_src,big_file_dest2), name="t2")
+# t1 = threading.Thread(target=shutil.copyfile,  args=(big_file_src,big_file_dest1), name="t1")
+# t2 = threading.Thread(target=shutil.copyfile,  args=(big_file_src,big_file_dest2), name="t2")
 
-t1.start()
-t2.start()
+# t1.start()
+# t2.start()
 
-t1.join()
-t2.join()
+# t1.join()
+# t2.join()
 
-src_hash = compute_md5(big_file_src)
-dest_hash1 = compute_md5(big_file_dest1)
-dest_hash2 = compute_md5(big_file_dest2)
+# src_hash = compute_md5(big_file_src)
+# dest_hash1 = compute_md5(big_file_dest1)
+# dest_hash2 = compute_md5(big_file_dest2)
 
-if((src_hash == dest_hash1) and (src_hash == dest_hash2)):
-	print("Test passed")
-else:
-	print("Test failed")
+# if((src_hash == dest_hash1) and (src_hash == dest_hash2)):
+# 	print("Test passed")
+# else:
+# 	print("Test failed")
 
-print("6.Testing boundary conditions. ???")
+# print("6.Testing boundary conditions. ???")

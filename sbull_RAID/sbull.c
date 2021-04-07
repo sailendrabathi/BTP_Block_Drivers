@@ -188,10 +188,12 @@ static int thread_test(void *data){
 		// printk(KERN_INFO "woke up on par_lock %d", ddev->num);
 		sbull_xfer_bio(ddev->backing_file, bio);
 		if(bio_data_dir(bio) == READ){
+			// printk(KERN_INFO "read");
 			if(!pdev->flag){
-				printk(KERN_INFO "parity not matched");
+				printk(KERN_INFO "parity not matched\n");
 			}
-		}		
+		}
+		// else printk(KERN_INFO "write");		
 		
 		bio_put(bio);
 		kfree(mb);
@@ -202,7 +204,7 @@ static int thread_test(void *data){
 
 		// printk(KERN_INFO "my bio done %d",  ddev->num);
 	}
-	printk(KERN_INFO "sbull: freeing pdev %d", ddev->num);
+	printk(KERN_INFO "sbull: freeing pdev %d\n", ddev->num);
 	kfree(pdev);
 
 	return 0;
@@ -246,20 +248,20 @@ static int parity_thread(void *data){
 				char oldbuf[bvec.bv_len+1];
 				loff_t temppos = pos;
 				len = kernel_read(dev->disk_devs[pdev->disk_num].backing_file , (void __user *) oldbuf ,bvec.bv_len , &temppos);
-				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
+				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed\n");
 				for(k=0; k<bvec.bv_len; k++)
 					newbuf[k] = newbuf[k]^oldbuf[k];
 				
 				char parbuf[bvec.bv_len+1];
 				temppos = pos;
 				len = kernel_read(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) parbuf ,bvec.bv_len , &temppos);
-				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
+				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed\n");
 				for(k=0; k<bvec.bv_len; k++)
 					parbuf[k] = parbuf[k]^newbuf[k];
 				
 				temppos = pos;
 				len = kernel_write(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) parbuf,bvec.bv_len , &temppos);
-				if(len<0) printk(KERN_INFO "Parity : kernel_write failed");
+				if(len<0) printk(KERN_INFO "Parity : kernel_write failed\n");
 
 				pos = temppos;	
 			}
@@ -274,7 +276,7 @@ static int parity_thread(void *data){
 
 				loff_t temppos = pos;
 				len = kernel_read(dev->disk_devs[pdev->disk_num].backing_file , (void __user *) databuf ,bvec.bv_len , &temppos);
-				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
+				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed\n");
 				
 				int d;
 				unsigned int k;
@@ -284,7 +286,7 @@ static int parity_thread(void *data){
 					char tempbuf[bvec.bv_len+1];
 					temppos = pos;
 					len = kernel_read(dev->disk_devs[d].backing_file , (void __user *) tempbuf ,bvec.bv_len , &temppos);
-					if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
+					if(len < 0) printk(KERN_INFO"Parity: kernel_read failed\n");
 				
 					for(k=0; k<bvec.bv_len; k++)
 						databuf[k] = databuf[k]^tempbuf[k];
@@ -294,7 +296,7 @@ static int parity_thread(void *data){
 				char parbuf[bvec.bv_len+1];
 				temppos = pos;
 				len = kernel_read(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) parbuf ,bvec.bv_len , &temppos);
-				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed");
+				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed\n");
 				
 				bool flag = true;
 				for(k=0; k<bvec.bv_len; k++){
@@ -325,7 +327,7 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 {
 	struct bio *bio;
 	unsigned int nsect = 0;
-    printk(KERN_INFO "entered sbull_xfer_request");
+    printk(KERN_INFO "entered sbull_xfer_request\n");
 
 	__rq_for_each_bio(bio, req){
 		struct bio* bio_1 = bio_clone_fast(bio, GFP_NOIO, NULL);
@@ -348,7 +350,7 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 			if(parity_disk <= disk_num) disk_num++;
 
 
-			printk(KERN_INFO"disknum: %d, stripe_index %d", disk_num, stripe_index);
+			printk(KERN_INFO"disknum: %d, stripe_index %d, read? %d\n", disk_num, stripe_index, bio_data_dir(bio) == READ);
 
 			struct my_bio* mb = kmalloc(sizeof(struct my_bio), GFP_KERNEL);
 			mb->disk_num = disk_num;
@@ -380,7 +382,7 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 	}
 	down(&barrier);
 
-	printk(KERN_INFO "exiting sbull_xfer_request");
+	printk(KERN_INFO "exiting sbull_xfer_request\n");
 
 	return nsect;
 }
@@ -580,7 +582,7 @@ static void setup_device(struct sbull_dev *dev, int which)
 	 * Get some memory.
 	 */
 
-	printk(KERN_INFO "sbull: entered setup device");
+	printk(KERN_INFO "sbull: entered setup device\n");
 	memset (dev, 0, sizeof (struct sbull_dev));
 	dev->size = nsectors*hardsect_size;
 	
@@ -636,7 +638,7 @@ static void setup_device(struct sbull_dev *dev, int which)
 	snprintf (dev->gd->disk_name, 32, "sbull%c", which + 'a');
 	set_capacity(dev->gd, nsectors*(hardsect_size/KERNEL_SECTOR_SIZE));
 	add_disk(dev->gd);
-	printk(KERN_INFO "sbull: exiting setup device");
+	printk(KERN_INFO "sbull: exiting setup device\n");
 	return;
 
 out_vfree:

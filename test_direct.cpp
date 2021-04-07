@@ -5,7 +5,7 @@ using namespace std;
 
 int main()
 {
-	fstream myDev("/dev/sbull", ios::in | ios::out | ios::trunc | ios::binary);
+	fstream myDev("/dev/sbulla", ios::in | ios::out | ios::trunc | ios::binary);
 	fstream myFile0("/home/sailendra/loopbackfile0.img", ios::in | ios::out | ios::trunc | ios::binary);
 	fstream myFile1("/home/sailendra/loopbackfile1.img", ios::in | ios::out | ios::trunc | ios::binary);
 	fstream myFile2("/home/sailendra/loopbackfile2.img", ios::in | ios::out | ios::trunc | ios::binary);
@@ -15,7 +15,6 @@ int main()
 
 
 	cout<<"writing Hello World to 0 offset"<<endl;
-    // Add the characters "Hello World" to the file
     myDev << "Hello World hello hello";
 
 	myDev.read(buff, 15);
