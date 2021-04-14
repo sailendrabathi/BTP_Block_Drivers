@@ -187,12 +187,12 @@ static int thread_test(void *data){
 		down(&pdev->par_lock);
 		// printk(KERN_INFO "woke up on par_lock %d", ddev->num);
 		sbull_xfer_bio(ddev->backing_file, bio);
-		if(bio_data_dir(bio) == READ){
+		// if(bio_data_dir(bio) == READ){
 			// printk(KERN_INFO "read");
-			if(!pdev->flag){
-				printk(KERN_INFO "parity not matched\n");
-			}
+		if(!pdev->flag){
+			printk(KERN_INFO "parity not matched\n");
 		}
+		// }
 		// else printk(KERN_INFO "write");		
 		
 		bio_put(bio);
@@ -235,36 +235,51 @@ static int parity_thread(void *data){
 		loff_t pos = ((bio->bi_iter.bi_sector)*KERNEL_SECTOR_SIZE);
 		unsigned int len;
 		if(bio_data_dir(bio) == WRITE){
+			bool final_flag = true;
 			bio_for_each_segment(bvec,bio,iter){
 				// printk(KERN_NOTICE "sbull_raid: parity check_1\n");
 
-				char newbuf[bvec.bv_len+1];
+				char buf_1[bvec.bv_len+1];
 				char *written = kmap_atomic(bvec.bv_page);
 				char *buffstart = written + bvec.bv_offset;
 				unsigned int k;
 				for(k=0; k<bvec.bv_len; k++)
-					newbuf[k] = buffstart[k];
+					buf_1[k] = buffstart[k];
 				kunmap_atomic(written);
-				char oldbuf[bvec.bv_len+1];
+				char buf_2[bvec.bv_len+1];
 				loff_t temppos = pos;
-				len = kernel_read(dev->disk_devs[pdev->disk_num].backing_file , (void __user *) oldbuf ,bvec.bv_len , &temppos);
+				len = kernel_read(dev->disk_devs[pdev->disk_num].backing_file , (void __user *) buf_2 ,bvec.bv_len , &temppos);
 				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed\n");
 				for(k=0; k<bvec.bv_len; k++)
-					newbuf[k] = newbuf[k]^oldbuf[k];
+					buf_1[k] = buf_1[k]^buf_2[k];
 				
-				char parbuf[bvec.bv_len+1];
 				temppos = pos;
-				len = kernel_read(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) parbuf ,bvec.bv_len , &temppos);
+				len = kernel_read(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) buf_2 ,bvec.bv_len , &temppos);
 				if(len < 0) printk(KERN_INFO"Parity: kernel_read failed\n");
 				for(k=0; k<bvec.bv_len; k++)
-					parbuf[k] = parbuf[k]^newbuf[k];
+					buf_2[k] = buf_2[k]^buf_1[k];
 				
 				temppos = pos;
-				len = kernel_write(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) parbuf,bvec.bv_len , &temppos);
+				len = kernel_write(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) buf_2,bvec.bv_len , &temppos);
 				if(len<0) printk(KERN_INFO "Parity : kernel_write failed\n");
+
+				temppos = pos;
+				len = kernel_read(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) buf_1,bvec.bv_len , &temppos);
+				if(len<0) printk(KERN_INFO "Parity : kernel_read failed\n");
+
+				bool flag = true;
+				for(k=0;k<bvec.bv_len;k++){
+					if(buf_1[k]!=buf_2[k]){
+						flag = false;
+						break;
+					}
+				}
+
+				final_flag = final_flag && flag;
 
 				pos = temppos;	
 			}
+			pdev->flag = final_flag;
 		}
 		else{
 			bool final_flag = true; 
@@ -318,6 +333,7 @@ static int parity_thread(void *data){
 	}
 	return 0;
 }
+
 
 
 /*
