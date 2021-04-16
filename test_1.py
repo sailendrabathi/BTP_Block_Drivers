@@ -10,8 +10,8 @@ img_path1 = "/home/sailendra/loopbackfile1.img"
 img_path2 = "/home/sailendra/loopbackfile2.img"
 
 def bitwise_xor_bytes(a, b):
-    result_int = int.from_bytes(a, byteorder="big") ^ int.from_bytes(b, byteorder="big")
-    return result_int.to_bytes(max(len(a), len(b)), byteorder="big")
+	result_int = int.from_bytes(a, byteorder="big") ^ int.from_bytes(b, byteorder="big")
+	return result_int.to_bytes(max(len(a), len(b)), byteorder="big")
 
 
 data = "The caged bird sings\nwith a fearful trill\nof things unknown\nbut longed for still"
@@ -127,10 +127,12 @@ f.close()
 
 def big_io(file_path, offset):
 	f = open(file_path, 'rb+')
-	f.seek(offset, 0)
-	for i in range(512):
-		data = ((i%256).to_bytes(1, 'big'))*1024
-		f.write(data)
+	for it in range(5):
+		print("bio IO itr", it, "start", offset)
+		f.seek(offset, 0)
+		for i in range(512):
+			data = ((i%256).to_bytes(1, 'big'))*1024
+			f.write(data)
 	f.close()
 
 

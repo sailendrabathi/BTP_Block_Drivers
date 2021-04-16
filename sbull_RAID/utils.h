@@ -37,6 +37,7 @@ struct par_dev{
 	int parity_disk;
 	struct semaphore par_lock;
 	bool flag;
+	int dir;
 };
 
 struct par_list {

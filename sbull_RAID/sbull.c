@@ -170,30 +170,39 @@ static int thread_test(void *data){
 
 		spin_unlock(&(ddev->lock));
 		
-		// printk(KERN_INFO "my bio start %d",  ddev->num);
-
-		pdev->par_bio = bio;
+		
 		pdev->disk_num = mb->disk_num;
 		pdev->parity_disk = mb->parity_disk;
 		sema_init(&pdev->par_lock, 0);
 		pdev->flag = false;
 
+		if(bio_data_dir(bio)==WRITE){
+			struct bio* bio_temp = bio_clone_fast(bio, GFP_NOIO, NULL);
+			pdev->par_bio = bio_temp;
+			pdev->dir = WRITE;
+			spin_lock(&par_lock);
+			par_list_add(&my_list,pdev);
+			wake_up(&par_req_event);
+			spin_unlock(&par_lock);
+
+			down(&pdev->par_lock);
+			bio_put(bio_temp);
+		}
+		
+		sbull_xfer_bio(ddev->backing_file, bio);
+		
+		pdev->par_bio = bio;
+		pdev->dir = READ;
 		spin_lock(&par_lock);
 		par_list_add(&my_list,pdev);
 		wake_up(&par_req_event);
 		spin_unlock(&par_lock);
 
-		// printk(KERN_INFO "waiting on par_lock %d", ddev->num);
 		down(&pdev->par_lock);
-		// printk(KERN_INFO "woke up on par_lock %d", ddev->num);
-		sbull_xfer_bio(ddev->backing_file, bio);
-		// if(bio_data_dir(bio) == READ){
-			// printk(KERN_INFO "read");
+
 		if(!pdev->flag){
 			printk(KERN_INFO "parity not matched\n");
 		}
-		// }
-		// else printk(KERN_INFO "write");		
 		
 		bio_put(bio);
 		kfree(mb);
@@ -234,11 +243,9 @@ static int parity_thread(void *data){
 		struct bvec_iter iter;
 		loff_t pos = ((bio->bi_iter.bi_sector)*KERNEL_SECTOR_SIZE);
 		unsigned int len;
-		if(bio_data_dir(bio) == WRITE){
-			bool final_flag = true;
+		if(pdev->dir == WRITE){
 			bio_for_each_segment(bvec,bio,iter){
-				// printk(KERN_NOTICE "sbull_raid: parity check_1\n");
-
+				
 				char buf_1[bvec.bv_len+1];
 				char *written = kmap_atomic(bvec.bv_page);
 				char *buffstart = written + bvec.bv_offset;
@@ -263,23 +270,8 @@ static int parity_thread(void *data){
 				len = kernel_write(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) buf_2,bvec.bv_len , &temppos);
 				if(len<0) printk(KERN_INFO "Parity : kernel_write failed\n");
 
-				temppos = pos;
-				len = kernel_read(dev->disk_devs[pdev->parity_disk].backing_file , (void __user *) buf_1,bvec.bv_len , &temppos);
-				if(len<0) printk(KERN_INFO "Parity : kernel_read failed\n");
-
-				bool flag = true;
-				for(k=0;k<bvec.bv_len;k++){
-					if(buf_1[k]!=buf_2[k]){
-						flag = false;
-						break;
-					}
-				}
-
-				final_flag = final_flag && flag;
-
 				pos = temppos;	
 			}
-			pdev->flag = final_flag;
 		}
 		else{
 			bool final_flag = true; 
@@ -343,7 +335,7 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 {
 	struct bio *bio;
 	unsigned int nsect = 0;
-    printk(KERN_INFO "entered sbull_xfer_request\n");
+    // printk(KERN_INFO "entered sbull_xfer_request\n");
 
 	__rq_for_each_bio(bio, req){
 		struct bio* bio_1 = bio_clone_fast(bio, GFP_NOIO, NULL);
@@ -366,7 +358,7 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 			if(parity_disk <= disk_num) disk_num++;
 
 
-			printk(KERN_INFO"disknum: %d, stripe_index %d, read? %d\n", disk_num, stripe_index, bio_data_dir(bio) == READ);
+			// printk(KERN_INFO"disknum: %d, stripe_index %d, read? %d\n", disk_num, stripe_index, bio_data_dir(bio) == READ);
 
 			struct my_bio* mb = kmalloc(sizeof(struct my_bio), GFP_KERNEL);
 			mb->disk_num = disk_num;
@@ -398,7 +390,7 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 	}
 	down(&barrier);
 
-	printk(KERN_INFO "exiting sbull_xfer_request\n");
+	// printk(KERN_INFO "exiting sbull_xfer_request\n");
 
 	return nsect;
 }
@@ -592,6 +584,9 @@ static struct blk_mq_ops mq_ops_full = {
 /*
  * Set up our internal device.
  */
+
+struct task_struct* par_thread;
+
 static void setup_device(struct sbull_dev *dev, int which)
 {
 	/*
@@ -614,7 +609,7 @@ static void setup_device(struct sbull_dev *dev, int which)
 		init_waitqueue_head(&dev->disk_devs[d].req_event);
 		spin_lock_init(&dev->disk_devs[d].lock);
 	}
-	struct task_struct* par_thread = kthread_create(parity_thread,dev,"parity_thread");
+	par_thread = kthread_create(parity_thread,dev,"parity_thread");
 	wake_up_process(par_thread);
 	init_waitqueue_head(&par_req_event);
 	spin_lock_init(&par_lock);
@@ -664,7 +659,11 @@ out_vfree:
 	for(i=0;i<NUM_DISKS;++i){
 		if (dev->disk_devs[i].backing_file)
 			fput(dev->disk_devs[i].backing_file);
-	}		
+
+		wake_up_process(dev->disk_devs[i].disk_thread);	
+		kthread_stop(dev->disk_devs[i].disk_thread);	
+	}
+	kthread_stop(par_thread);
 }
 
 
@@ -717,7 +716,11 @@ static void sbull_exit(void)
 		for(j=0;j<NUM_DISKS;++j){
 			if (dev->disk_devs[j].backing_file)
 				fput(dev->disk_devs[j].backing_file);
+
+			wake_up_process(dev->disk_devs[j].disk_thread);
+			kthread_stop(dev->disk_devs[j].disk_thread);	
 		}	
+		kthread_stop(par_thread);
 	}
 	unregister_blkdev(sbull_major, "sbull");
 	kfree(Devices);
